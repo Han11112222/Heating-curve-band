@@ -1,10 +1,10 @@
-# app.py — Heating-curve-band | HeatBand Insight (2025-10-14)
+# app.py — Heating-curve-band | HeatBand Insight (2025-10-14, 옵션·예측설정 제거 버전)
 # 단위: 공급량(MJ), 변화율 dQ/dT(MJ/℃)
 # 업데이트:
-#  - A0: Poly-3 산점도 + R² + 95% CI + 식
-#  - C: 0~5℃ Δ1℃ 표에 "증가량(해석용)=max(0, −dQ/dT)" 적용, 원값은 Expander로 분리
-#  - C: 10→5, 5→0, 0→−5 구간 평균 증가량 요약(불릿) 추가
-#  - 사이드바 하단: "예측 시작" 버튼 도입(눌러야 계산)
+#  - Poly-3 산점도 + R² + 95% CI + 식
+#  - 0~5℃ Δ1℃ 표에 "증가량(해석용)=max(0, −dQ/dT)" 적용, 원값은 Expander로 분리
+#  - 10→5, 5→0, 0→−5 구간 평균 증가량 요약(불릿)
+#  - 사이드바의 ⑤ 분석 옵션, ⑥ 예측 설정 제거 → 자동 실행
 
 import os
 from typing import Tuple, List
@@ -224,11 +224,8 @@ if df_train.empty:
     st.warning("선택된 학습 연도에 데이터가 없습니다.")
     st.stop()
 
-# ── 옵션 + 버튼 ─────────────────────────────────────────────
-st.sidebar.header("⑤ 분석 옵션")
-th_min  = st.sidebar.number_input("θ* 탐색 최소(℃)", value=0.0, step=0.5)
-th_max  = st.sidebar.number_input("θ* 탐색 최대(℃) (≤20 권장)", value=20.0, step=0.5)
-th_step = st.sidebar.number_input("θ* 탐색 간격", value=0.1, step=0.1)
+# ── θ* 탐색 파라미터(내부 고정) ──────────────────────────────
+th_min, th_max, th_step = 0.0, 20.0, 0.1
 
 # 시각 구간: 자동
 T_train = df_train["temp"].values
@@ -236,14 +233,6 @@ p1, p99 = np.percentile(T_train, 1), np.percentile(T_train, 99)
 pad = 1.5
 xmin_vis = float(np.floor(p1 - pad))
 xmax_vis = float(np.ceil(min(25.0, p99 + pad)))
-
-st.sidebar.markdown("---")
-st.sidebar.header("⑥ 예측 설정")
-pred_y1 = st.sidebar.selectbox("예측 시작(연)", sorted(df_all["year"].unique()), index=max(0, len(sorted(df_all['year'].unique()))-1))
-pred_m1 = st.sidebar.selectbox("예측 시작(월)", list(range(1,13)), index=0)
-pred_y2 = st.sidebar.selectbox("예측 종료(연)", sorted(df_all["year"].unique()), index=max(0, len(sorted(df_all['year'].unique()))-1))
-pred_m2 = st.sidebar.selectbox("예측 종료(월)", list(range(1,12)), index=11)
-run = st.sidebar.button("🚀 예측 시작", use_container_width=True)
 
 # ── A0: 상관(Poly-3) ────────────────────────────────────────
 st.subheader(f"A0. 기온–공급량 상관(Poly-3) — 대상: {target_choice}")
@@ -282,11 +271,6 @@ fig_corr.add_annotation(xref="paper", yref="paper", x=0.01, y=0.02,
                         bgcolor="rgba(255,255,255,0.85)", bordercolor="black",
                         borderwidth=1, font=dict(size=12))
 st.plotly_chart(fig_corr, use_container_width=True, config={"displaylogo": False})
-
-# ── 메인 계산(버튼 필요) ─────────────────────────────────────
-if not run:
-    st.info("좌측 **🚀 예측 시작** 버튼을 누르면 상세 계산을 보여줄게.")
-    st.stop()
 
 # ── A: Heating Start ─────────────────────────────────────────
 st.subheader(f"A. Heating Start Zone — 베이스온도(θ*) · 대상: {target_choice}")
@@ -362,7 +346,6 @@ if inc05_rows_clamped:
     st.download_button("0~5℃ Δ1℃ CSV 다운로드(해석용)",
                        data=inc_piv.reset_index().to_csv(index=False).encode("utf-8-sig"),
                        file_name=f"delta1c_0to5_clamped_{target_col}.csv", mime="text/csv")
-    # 원값은 별도 Expander
     with st.expander("원값 보기(−dQ/dT, 음수 포함)"):
         raw = pd.DataFrame(inc05_rows_raw)
         raw_piv = raw.pivot(index="월", columns="T(℃)", values="Δ1℃(원값 MJ)").sort_index()
@@ -390,7 +373,6 @@ def band_mean(temps: List[int]) -> float:
             pool.append(row["Δ1℃ 증가량(MJ)"])
     return float(np.mean(pool)) if pool else np.nan
 
-# 10→5는 원데이터에 6~10이 없을 수 있어 Poly-3 전체에서 계산
 def band_mean_from_model(temp_list: List[int], model, pf) -> float:
     vals = []
     for t0 in temp_list:
@@ -401,7 +383,6 @@ def band_mean_from_model(temp_list: List[int], model, pf) -> float:
 st.markdown("### 3차 다항식 요약(해석용)")
 mean_10_5 = band_mean_from_model([10,9,8,7,6,5], m_poly, pf_poly)
 mean_5_0  = band_mean([5,4,3,2,1,0])
-# 0→−5는 모델에서 직접(−1~−5)
 mean_0_m5 = band_mean_from_model([0,-1,-2,-3,-4,-5], m_poly, pf_poly)
 
 st.markdown(f"- **10→5℃ 구간**: 기온이 1℃ 내릴 때 평균 **{fmt_int(mean_10_5)} MJ/℃** 증가")
