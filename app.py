@@ -1,13 +1,8 @@
-# app.py — Heating-curve-band | HeatBand Insight (2025-10-14, 옵션·예측설정 제거 버전)
+# app.py — HeatBand Insight (2025-10-14, T_cap/0값수정/요약표 강화)
 # 단위: 공급량(MJ), 변화율 dQ/dT(MJ/℃)
-# 업데이트:
-#  - Poly-3 산점도 + R² + 95% CI + 식
-#  - 0~5℃ Δ1℃ 표에 "증가량(해석용)=max(0, −dQ/dT)" 적용, 원값은 Expander로 분리
-#  - 10→5, 5→0, 0→−5 구간 평균 증가량 요약(불릿)
-#  - 사이드바의 ⑤ 분석 옵션, ⑥ 예측 설정 제거 → 자동 실행
 
 import os
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -28,7 +23,7 @@ if os.path.exists(FONT_PATH):
 PLOT_FONT = "NanumGothic, Arial, Noto Sans KR, sans-serif"
 
 st.title("🔥 HeatBand Insight — 난방구간·민감도 분석")
-st.caption("단위: 공급량 **MJ**, 변화율 **MJ/℃** · Heating Start(θ*) · Heating Slowdown · Δ1°C Impact")
+st.caption("단위: 공급량 **MJ**, 변화율 **MJ/℃** · Heating Start(θ*) · Heating Slowdown · Saturation(T_cap) · Δ1°C Impact")
 
 # ── Utils ───────────────────────────────────────────────────
 def to_num(x):
@@ -92,15 +87,6 @@ def hinge_base_temp(T: np.ndarray, Q: np.ndarray,
             best_th, best_a, best_b = th, float(beta[0]), float(beta[1])
     return best_th, best_a, best_b
 
-@st.cache_data
-def load_excel(path_or_buf) -> pd.DataFrame:
-    import openpyxl
-    try:
-        return pd.read_excel(path_or_buf, sheet_name="data")
-    except Exception:
-        xls = pd.ExcelFile(path_or_buf)
-        return pd.read_excel(xls, sheet_name=xls.sheet_names[0])
-
 def nice_poly_string(a,b,c,d, digits=1):
     def term(v, s, lead=False):
         if abs(v) < 1e-12: return ""
@@ -128,6 +114,19 @@ def df_commas(df, except_cols=None):
             out[c] = out[c].apply(fmt_int)
     return out
 
+# 안전평가: 월별 모델 평가 시 t0가 월별 샘플 범위 밖이면 글로벌 모델 사용
+def safe_delta1c(t0: float, month_df: pd.DataFrame, month_model, month_pf,
+                 global_model, global_pf) -> float:
+    if len(month_df) < 6:
+        dqdT = poly3_d1_at(global_model, global_pf, t0)
+    else:
+        tmin, tmax = float(month_df["temp"].min()), float(month_df["temp"].max())
+        if (t0 < tmin) or (t0 > tmax):
+            dqdT = poly3_d1_at(global_model, global_pf, t0)
+        else:
+            dqdT = poly3_d1_at(month_model, month_pf, t0)
+    return max(0.0, -dqdT)  # 1℃ 하락 시 증가량(해석용; 음수 하한 0)
+
 # ── Plot helpers ─────────────────────────────────────────────
 def make_start_figure(df_all, df_train, theta_star, a_hat, b_hat, xmin_vis, xmax_vis, y_title="공급량(MJ)") -> go.Figure:
     tline = np.linspace(xmin_vis, xmax_vis, 320)
@@ -152,16 +151,23 @@ def make_start_figure(df_all, df_train, theta_star, a_hat, b_hat, xmin_vis, xmax
                       yaxis=dict(title=y_title, tickformat=","), title="힌지 적합과 Heating Start Zone")
     return fig
 
-def make_derivative_figure(tgrid, d1, theta_star, T_slow, xmin_vis, xmax_vis, y_title="변화율 dQ/dT (MJ/℃)") -> go.Figure:
+def make_derivative_figure(tgrid, d1, theta_star, T_slow, T_cap, xmin_vis, xmax_vis,
+                           y_title="변화율 dQ/dT (MJ/℃)") -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=tgrid, y=d1, mode="lines", name="dQ/dT (MJ/℃)",
                              hovertemplate="T=%{x:.2f}℃<br>dQ/dT=%{y:,.0f} MJ/℃<extra></extra>"))
-    fig.add_vline(x=T_slow, line_dash="dash", line_color="red",
-                  annotation_text=f"Slowdown {T_slow:.2f}℃", annotation_position="top left")
+    if np.isfinite(T_slow):
+        fig.add_vline(x=T_slow, line_dash="dash", line_color="red",
+                      annotation_text=f"Slowdown {T_slow:.2f}℃", annotation_position="top left")
+        fig.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.14, line_width=0,
+                      annotation_text="Heating Slowdown Zone", annotation_position="top left")
+    if np.isfinite(T_cap):
+        fig.add_vline(x=T_cap, line_dash="dot", line_color="black",
+                      annotation_text=f"Saturation T_cap={T_cap:.2f}℃", annotation_position="bottom left")
+        fig.add_vrect(x0=xmin_vis, x1=T_cap, fillcolor="LightGray", opacity=0.10, line_width=0,
+                      annotation_text="Saturation Zone", annotation_position="bottom left")
     fig.add_vline(x=theta_star, line_dash="dash", line_color="steelblue",
                   annotation_text=f"Start θ*={theta_star:.2f}℃", annotation_position="top right")
-    fig.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.14, line_width=0,
-                  annotation_text="Heating Slowdown Zone", annotation_position="top left")
     fig.add_vrect(x0=T_slow, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.14, line_width=0,
                   annotation_text="Heating Start Zone", annotation_position="top right")
     fig.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
@@ -285,67 +291,83 @@ st.plotly_chart(
     use_container_width=True, config={"displaylogo": False}
 )
 
-# ── B: Slowdown & dQ/dT ─────────────────────────────────────
+# ── B: Slowdown, Saturation & dQ/dT ─────────────────────────
 st.subheader("B. Heating Slowdown Zone & dQ/dT (Poly-3)")
 m_poly, pf_poly, _ = fit_poly3(df_train["temp"].values, df_train[target_col].values)
-tgrid = np.linspace(xmin_vis, xmax_vis, 600)
+tgrid = np.linspace(xmin_vis, xmax_vis, 800)
 d1 = np.array([poly3_d1_at(m_poly, pf_poly, t) for t in tgrid])
-T_slow = float(tgrid[int(np.argmin(d1))])
+T_slow = float(tgrid[int(np.argmin(d1))])  # 최대 음의 기울기 위치(가장 민감)
+# 포화온도: −dQ/dT가 전체 최대값의 2% 이하가 되는 가장 낮은 온도
+max_neg = float(np.max(np.maximum(0.0, -d1)))
+eps = 0.02 * max_neg if max_neg > 0 else 0.0
+candidates = tgrid[(np.maximum(0.0, -d1) <= eps)]
+T_cap = float(candidates.min()) if candidates.size > 0 else np.nan
+
 st.metric("Slowdown 경계 T_slow", f"{T_slow:.2f} ℃")
+if np.isfinite(T_cap):
+    st.metric("Saturation 포화온도 T_cap", f"{T_cap:.2f} ℃")
+
 st.plotly_chart(
-    make_derivative_figure(tgrid, d1, theta_star, T_slow, xmin_vis, xmax_vis),
+    make_derivative_figure(tgrid, d1, theta_star, T_slow, T_cap, xmin_vis, xmax_vis),
     use_container_width=True, config={"displaylogo": False}
 )
 
-# ── C: Δ1℃ + 식 + 0~5℃ 구간(해석용) ─────────────────────────
+# ── C: Δ1℃ + 월별 식(가독화) ─────────────────────────────────
 st.subheader("C. Δ1°C Impact — 동절기 같은 월 & 표준기온(0/5/10℃) (Poly-3)")
 winter_months = st.multiselect("동절기 월", [12,1,2,3,11,4], default=[12,1,2,3], key="winter_sel")
-sel_month_for_equation = st.multiselect("식/세부표를 보고 싶은 월(선택)", [1,2,3,4,5,6,7,8,9,10,11,12],
+sel_month_for_equation = st.multiselect("식/세부표를 보고 싶은 월(선택)", list(range(1,13)),
                                         default=winter_months, key="eq_months")
 
-rows_std = []; rows_med = []; poly_rows = []; inc05_rows_raw = []; inc05_rows_clamped = []
+rows_std = []; rows_med = []; poly_rows = []; inc05_rows_raw = []; inc05_rows = []
 for m in sorted(set(winter_months)):
     dm = df_train[df_train["month"] == m]
-    if len(dm) < 6:
-        continue
     Tm, Qm = dm["temp"].values, dm[target_col].values
-    model, pf, _ = fit_poly3(Tm, Qm)
-    a0,b1,c2,d3 = poly3_coeffs(model)
-    poly_rows.append({"월": m, "식": nice_poly_string(a0,b1,c2,d3, digits=3),
-                      "β0": a0, "β1": b1, "β2": c2, "β3": d3, "표본수": len(dm)})
+    m_month, pf_month, _ = fit_poly3(Tm, Qm) if len(dm) >= 6 else (m_poly, pf_poly, None)
+    a0,b1,c2,d3 = poly3_coeffs(m_month)
+    # 가독화된 식 + 해석열(0/5/10에서의 영향치)
+    poly_rows.append({
+        "월": m, "식(간단)": nice_poly_string(a0,b1,c2,d3, digits=2),
+        "표본수": len(dm),
+        "Δ1℃@0℃(MJ)": fmt_int(max(0.0, -poly3_d1_at(m_month, pf_month, 0.0))),
+        "Δ1℃@5℃(MJ)": fmt_int(max(0.0, -poly3_d1_at(m_month, pf_month, 5.0))),
+        "Δ1℃@10℃(MJ)": fmt_int(max(0.0, -poly3_d1_at(m_month, pf_month, 10.0))),
+    })
 
-    if m in sel_month_for_equation:
-        for t0 in [0,1,2,3,4,5]:
-            dqdT = b1 + 2*c2*t0 + 3*d3*(t0**2)
-            raw = -dqdT
-            inc05_rows_raw.append({"월": m, "T(℃)": t0, "Δ1℃(원값 MJ)": raw})
-            inc05_rows_clamped.append({"월": m, "T(℃)": t0, "Δ1℃ 증가량(MJ)": max(0.0, raw)})
+    # 0~5℃ 해석 표(‘0’ 문제 방지: safe_eval 사용)
+    for t0 in [0,1,2,3,4,5]:
+        val = safe_delta1c(float(t0), dm, m_month, pf_month, m_poly, pf_poly)
+        inc05_rows.append({"월": m, "T(℃)": t0, "Δ1℃ 증가량(MJ)": val})
+        inc05_rows_raw.append({"월": m, "T(℃)": t0, "Δ1℃(원값 MJ)": -poly3_d1_at(m_month, pf_month, float(t0))})
 
+    # 표준기온 표(0/5/10)
     for t0 in [0.0, 5.0, 10.0]:
-        dqdT = b1 + 2*c2*t0 + 3*d3*(t0**2)
-        rows_std.append({"월": m, "표준기온(℃)": t0, "Δ1℃ 증가량(MJ)": max(0.0, -dqdT), "dQ/dT(MJ/℃)": dqdT,
-                         "난방구간?": "예" if t0 <= theta_star else "아니오", "표본수": len(dm)})
+        dqdT = poly3_d1_at(m_month, pf_month, t0)
+        rows_std.append({"월": m, "표준기온(℃)": t0, "Δ1℃ 증가량(MJ)": max(0.0, -dqdT),
+                         "dQ/dT(MJ/℃)": dqdT, "난방구간?": "예" if t0 <= theta_star else "아니오",
+                         "표본수": len(dm)})
 
-    Trep = float(np.median(Tm))
-    dqdT_med = b1 + 2*c2*Trep + 3*d3*(Trep**2)
-    rows_med.append({"월": m, "대표기온(℃)": round(Trep,2),
-                     "Δ1℃ 증가량(MJ)": max(0.0, -dqdT_med), "dQ/dT(MJ/℃)": dqdT_med, "표본수": len(dm)})
+    # 대표기온(월 중앙값)
+    if len(dm) > 0:
+        Trep = float(np.median(Tm))
+        dqdT_med = poly3_d1_at(m_month, pf_month, Trep)
+        rows_med.append({"월": m, "대표기온(℃)": round(Trep,2),
+                         "Δ1℃ 증가량(MJ)": max(0.0, -dqdT_med), "표본수": len(dm)})
 
-# 월별 3차 다항식 표
+# 월별 3차 다항식(간단) + 해석열
 if poly_rows:
-    st.markdown("**월별 3차 다항식(학습 연도, 대상: "+target_choice+")**")
+    st.markdown("**월별 3차 다항식(간단 표기) & 해석치(0/5/10℃ 기준)**")
     pdf = pd.DataFrame(poly_rows).sort_values("월").set_index("월")
-    st.dataframe(df_commas(pdf[["식","β0","β1","β2","β3","표본수"]], except_cols=["식"]))
+    st.dataframe(pdf)
 
-# 0~5℃ 구간 표(해석용=clamp 0)
-if inc05_rows_clamped:
-    inc05 = pd.DataFrame(inc05_rows_clamped)
+# 0~5℃ 구간(해석용)
+if inc05_rows:
+    inc05 = pd.DataFrame(inc05_rows)
     inc_piv = inc05.pivot(index="월", columns="T(℃)", values="Δ1℃ 증가량(MJ)").sort_index()
-    st.markdown("**0℃~5℃ 구간: 1℃ 하락 시 증가량 [MJ] (해석용·0 하한)**")
+    st.markdown("**0℃~5℃ 구간: 1℃ 하락 시 증가량 [MJ] (안전평가 반영)**")
     st.dataframe(df_commas(inc_piv.reset_index()).set_index("월"))
-    st.download_button("0~5℃ Δ1℃ CSV 다운로드(해석용)",
+    st.download_button("0~5℃ Δ1℃ CSV 다운로드",
                        data=inc_piv.reset_index().to_csv(index=False).encode("utf-8-sig"),
-                       file_name=f"delta1c_0to5_clamped_{target_col}.csv", mime="text/csv")
+                       file_name=f"delta1c_0to5_safe_{target_col}.csv", mime="text/csv")
     with st.expander("원값 보기(−dQ/dT, 음수 포함)"):
         raw = pd.DataFrame(inc05_rows_raw)
         raw_piv = raw.pivot(index="월", columns="T(℃)", values="Δ1℃(원값 MJ)").sort_index()
@@ -356,38 +378,34 @@ if rows_std:
     std_df = pd.DataFrame(rows_std)
     pivot_inc = std_df.pivot_table(index="월", columns="표준기온(℃)",
                                    values="Δ1℃ 증가량(MJ)", aggfunc="mean").sort_index()
-    st.markdown("**표준기온 Δ1℃ 증가량(해석용·0 하한) [MJ]**")
+    st.markdown("**표준기온(0/5/10℃) Δ1℃ 증가량 [MJ]**")
     st.dataframe(df_commas(pivot_inc.reset_index()).set_index("월"))
 
-# 대표기온(월 중앙값)
+# 대표기온(월 중앙값) 기반 ‘연간 1℃’ 평균
+annual_avg = None
 if rows_med:
-    med = pd.DataFrame(rows_med).sort_values("월").set_index("월")
-    st.markdown("**동절기 같은 월 — 대표기온(월 중앙값) 기준 Δ1℃ 증가량 [MJ] (해석용)**")
-    st.dataframe(df_commas(med[["대표기온(℃)","Δ1℃ 증가량(MJ)","표본수"]], except_cols=["대표기온(℃)"]))
+    med = pd.DataFrame(rows_med)
+    # 표본수 가중 평균
+    annual_avg = float(np.average(med["Δ1℃ 증가량(MJ)"], weights=med["표본수"]))
+    st.markdown("### 연간 1℃ 하락 시 평균 증가량 (월 대표기온, 표본수 가중)")
+    st.metric("Annual Δ1℃ Average", f"{fmt_int(annual_avg)} MJ/℃")
 
-# 구간 요약(불릿): 10→5 / 5→0 / 0→−5
-def band_mean(temps: List[int]) -> float:
-    pool = []
-    for row in inc05_rows_clamped:
-        if int(row["T(℃)"]) in temps:
-            pool.append(row["Δ1℃ 증가량(MJ)"])
-    return float(np.mean(pool)) if pool else np.nan
-
-def band_mean_from_model(temp_list: List[int], model, pf) -> float:
-    vals = []
-    for t0 in temp_list:
-        raw = max(0.0, -poly3_d1_at(model, pf, float(t0)))
-        vals.append(raw)
+# 구간 요약(표): −5~0 / 0~5 / 5~10
+def band_mean_from_model(temp_list: List[float], model, pf) -> float:
+    vals = [max(0.0, -poly3_d1_at(model, pf, float(t0))) for t0 in temp_list]
     return float(np.mean(vals)) if vals else np.nan
 
-st.markdown("### 3차 다항식 요약(해석용)")
-mean_10_5 = band_mean_from_model([10,9,8,7,6,5], m_poly, pf_poly)
-mean_5_0  = band_mean([5,4,3,2,1,0])
-mean_0_m5 = band_mean_from_model([0,-1,-2,-3,-4,-5], m_poly, pf_poly)
+st.markdown("### 구간별 Δ1℃ 증가량 요약 [MJ/℃] (모델 기반)")
+mean_m5_0 = band_mean_from_model([-5,-4,-3,-2,-1,0], m_poly, pf_poly)
+mean_0_5  = band_mean_from_model([0,1,2,3,4,5], m_poly, pf_poly)
+mean_5_10 = band_mean_from_model([5,6,7,8,9,10], m_poly, pf_poly)
 
-st.markdown(f"- **10→5℃ 구간**: 기온이 1℃ 내릴 때 평균 **{fmt_int(mean_10_5)} MJ/℃** 증가")
-st.markdown(f"- **5→0℃ 구간**: 기온이 1℃ 내릴 때 평균 **{fmt_int(mean_5_0)} MJ/℃** 증가")
-st.markdown(f"- **0→−5℃ 구간**: 기온이 1℃ 내릴 때 평균 **{fmt_int(mean_0_m5)} MJ/℃** 증가")
+summary_df = pd.DataFrame({
+    "항목": ["연간 평균(월 대표기온, 가중)", "구간 평균(−5~0℃)", "구간 평균(0~5℃)", "구간 평균(5~10℃)"],
+    "Δ1℃ 증가량 [MJ/℃]": [annual_avg if annual_avg is not None else np.nan,
+                       mean_m5_0, mean_0_5, mean_5_10]
+})
+st.dataframe(df_commas(summary_df))
 
 # ── D: 히트맵(해석용 값) ─────────────────────────────────────
 st.subheader("D. 월별 탄력성 히트맵 — −dQ/dT@표준기온 (MJ/℃, 해석용·0 하한)")
@@ -395,11 +413,9 @@ heat_rows = []
 for m in range(1,13):
     dm = df_train[df_train["month"] == m]
     n = len(dm)
-    if n < 6:
-        continue
-    model, pf, _ = fit_poly3(dm["temp"].values, dm[target_col].values)
+    m_month, pf_month, _ = fit_poly3(dm["temp"].values, dm[target_col].values) if n >= 6 else (m_poly, pf_poly, None)
     for t0 in [0.0, 5.0, 10.0]:
-        val = max(0.0, -poly3_d1_at(model, pf, t0))
+        val = safe_delta1c(float(t0), dm, m_month, pf_month, m_poly, pf_poly)
         heat_rows.append({"월": m, "표준기온(℃)": t0, "증가량(MJ/℃)": val, "표본수": n})
 
 if heat_rows:
@@ -426,5 +442,5 @@ if heat_rows:
     fig_hm = go.Figure(data=[heat])
     fig_hm.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
                          margin=dict(l=40,r=20,t=40,b=40),
-                         title="월×기온 탄력성(기온 1℃ 하락 시 증가량, 해석용)")
+                         title="월×기온 탄력성(기온 1℃ 하락 시 증가량, 안전평가 반영)")
     st.plotly_chart(fig_hm, use_container_width=True, config={"displaylogo": False})
