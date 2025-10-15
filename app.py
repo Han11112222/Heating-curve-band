@@ -1,5 +1,5 @@
-# app.py — HeatBand Insight (임원용 요약 UI + 동적 그래프 + XLSX Export)
-# 단위: 공급량 Q(MJ), 민감도/증가량 Δ1°C(MJ/℃=−dQ/dT)
+# app.py — HeatBand Insight (요약 UI + 동적 그래프 + XLSX Export, 5% CI & 라벨 겹침 해소)
+# 단위: 공급량 Q(MJ), 민감도/증가량 Δ1°C(MJ/℃ = −dQ/dT)
 
 import os, io
 from typing import Tuple, List
@@ -22,7 +22,7 @@ if os.path.exists(FONT_PATH):
         pass
 PLOT_FONT = "NanumGothic, Arial, Noto Sans KR, sans-serif"
 
-st.title("🔥 HeatBand Insight — 난방구간·민감도 분석 (임원용)")
+st.title("🔥 HeatBand Insight — 난방구간·민감도 분석")  # (임원용) 문구 제거
 
 # ── Utils ───────────────────────────────────────────────────
 def to_num(x):
@@ -52,7 +52,8 @@ def poly3_r2(y_true, y_pred):
     ss_tot = np.sum((y_true - np.mean(y_true))**2)
     return 1.0 - ss_res/ss_tot if ss_tot > 0 else np.nan
 
-def poly3_conf_band(x_train, y_train, tgrid, m, pf):
+def conf_band_y(x_train, y_train, tgrid, m, pf, z=1.96):
+    """y(공급량) 예측의 신뢰구간"""
     X = pf.transform(x_train.reshape(-1,1))
     yhat = m.predict(X)
     n, p = X.shape
@@ -60,9 +61,8 @@ def poly3_conf_band(x_train, y_train, tgrid, m, pf):
     XtX_inv = np.linalg.pinv(X.T @ X)
     Tg = pf.transform(tgrid.reshape(-1,1))
     se = np.sqrt(np.sum(Tg @ XtX_inv * Tg, axis=1) * sigma2)
-    z = 1.96
     ypred = m.predict(Tg)
-    return ypred - z*se, ypred + z*se, ypred
+    return ypred - z*se, ypred + z*se, ypred, sigma2, XtX_inv
 
 def d1_at(m: LinearRegression, t: float) -> float:
     a,b,c,d = poly3_coeffs(m)
@@ -185,13 +185,26 @@ a,b,c,d = poly3_coeffs(m_all)
 eq_str  = nice_poly_string(a,b,c,d, digits=1)
 
 tgrid = np.linspace(xmin_vis, xmax_vis, 801)
-ci_lo, ci_hi, y_pred = poly3_conf_band(train["temp"].values, train["Q"].values, tgrid, m_all, pf_all)
+# y-신뢰구간(95%) 및 회귀 공분산 획득
+ci_lo_95, ci_hi_95, y_pred, sigma2, XtX_inv = conf_band_y(
+    train["temp"].values, train["Q"].values, tgrid, m_all, pf_all, z=1.96
+)
+
+# ── 도함수(민감도)와 5% CI(=90% 신뢰구간) ─────────────────────
+# 델타 메서드: dQ/dT = [0,1,2t,3t^2]·β  → Var = J Σ J^T
+J = np.vstack([np.ones_like(tgrid)*0, np.ones_like(tgrid), 2*tgrid, 3*(tgrid**2)]).T
+deriv_mean = np.array([d1_at(m_all, t) for t in tgrid])              # dQ/dT (음수)
+deriv_se   = np.sqrt(np.sum(J @ XtX_inv * J, axis=1) * sigma2)
+z90 = 1.645  # 양쪽 5%씩
+d_lo = deriv_mean - z90*deriv_se
+d_hi = deriv_mean + z90*deriv_se
+minus_d1 = np.maximum(0.0, -deriv_mean)           # 증가량(양수)
+inc_lo   = np.maximum(0.0, -d_hi)                 # 하한(증가량 관점)
+inc_hi   = np.maximum(0.0, -d_lo)                 # 상한
 
 # ── 난방 시작/둔화/포화 ─────────────────────────────────────
 theta_star, a_hat, b_hat = hinge_base_temp(train["temp"].values, train["Q"].values, 0.0, 20.0, 0.1)
-d1_curve = np.array([d1_at(m_all, t) for t in tgrid])         # dQ/dT(음수)
-minus_d1 = np.maximum(0.0, -d1_curve)                         # 증가량(양수 표기)
-T_slow   = float(tgrid[int(np.argmin(d1_curve))])             # 최저 기울기 지점
+T_slow   = float(tgrid[int(np.argmin(deriv_mean))])             # 최저 기울기 지점
 max_neg  = float(np.max(minus_d1))
 T_cap    = float(tgrid[np.argmax(minus_d1 <= 0.02*max_neg)]) if max_neg>0 else np.nan
 
@@ -204,7 +217,7 @@ figA.add_trace(go.Scatter(
     hovertemplate="T=%{x:.2f}℃<br>Q=%{y:,.0f} MJ<extra></extra>"
 ))
 figA.add_trace(go.Scatter(
-    x=np.r_[tgrid, tgrid[::-1]], y=np.r_[ci_hi, ci_lo[::-1]],
+    x=np.r_[tgrid, tgrid[::-1]], y=np.r_[ci_hi_95, ci_lo_95[::-1]],
     fill="toself", name="95% CI",
     line=dict(color="rgba(0,0,0,0)"),
     fillcolor="rgba(0,123,255,0.18)", hoverinfo="skip"
@@ -235,15 +248,24 @@ figB.add_trace(go.Scatter(x=train["temp"], y=train["Q"], mode="markers", name="�
                           hovertemplate="T=%{x:.2f}℃<br>Q=%{y:,.0f} MJ<extra></extra>"))
 figB.add_trace(go.Scatter(x=tline, y=qhat, mode="lines", name="힌지 적합",
                           hovertemplate="T=%{x:.2f}℃<br>예측=%{y:,.0f} MJ<extra></extra>"))
-figB.add_vline(x=theta_star, line_dash="dash",
-               annotation_text=f"Start θ*={theta_star:.2f}℃", annotation_position="top right")
-figB.add_vrect(x0=xmin_vis, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.18, line_width=0,
-               annotation_text="Heating Start Zone", annotation_position="top left")
-figB.add_vline(x=T_slow, line_dash="dash", line_color="red",
-               annotation_text=f"Slowdown {T_slow:.2f}℃", annotation_position="top left")
+
+# 영역은 shape로만 칠하고, 텍스트는 plot 바깥(yref='paper')로 올려 겹침 해소
+figB.add_vrect(x0=xmin_vis, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.18, line_width=0, layer="below")
+figB.add_annotation(x=(xmin_vis+theta_star)/2, y=1.06, xref="x", yref="paper",
+                    text="Heating Start Zone", showarrow=False, font=dict(size=12))
+
+figB.add_vline(x=theta_star, line_dash="dash")
+figB.add_annotation(x=theta_star, y=1.10, xref="x", yref="paper",
+                    text=f"Start θ* = {theta_star:.2f}℃", showarrow=False, font=dict(size=12))
+
+figB.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.14, line_width=0, layer="below")
+figB.add_annotation(x=(xmin_vis+T_slow)/2, y=1.06, xref="x", yref="paper",
+                    text=f"Heating Slowdown Zone (≤ {T_slow:.2f}℃)", showarrow=False, font=dict(size=12))
+
 if np.isfinite(T_cap):
-    figB.add_vline(x=T_cap, line_dash="dot", line_color="black",
-                   annotation_text=f"Saturation {T_cap:.2f}℃", annotation_position="bottom left")
+    figB.add_vline(x=T_cap, line_dash="dot")
+    figB.add_annotation(x=T_cap, y=1.02, xref="x", yref="paper",
+                        text=f"Saturation {T_cap:.2f}℃", showarrow=False, font=dict(size=12))
 
 figB.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
                    margin=dict(l=40,r=20,t=40,b=40),
@@ -277,15 +299,9 @@ f"""
 """
 )
 
-# ── (D) 구간별 동적 그래프(−dQ/dT = 증가량, 95% CI 근사) ─────────
-st.subheader("D. 기온 구간별 동적 그래프 (−dQ/dT = 1℃ 하락 시 증가량, 95% CI)")
+# ── (D) 구간별 동적 그래프(−dQ/dT = 증가량, 5% CI) ─────────────
+st.subheader("D. 기온 구간별 동적 그래프 (−dQ/dT = 1℃ 하락 시 증가량, 5% CI ≈ 90%)")
 tab1, tab2, tab3 = st.tabs(["−5~0℃", "0~5℃", "5~10℃"])
-
-# y 신뢰구간(ci_lo/hi)을 미분하여 민감도 CI 근사
-dy_hi = np.gradient(ci_hi, tgrid)
-dy_lo = np.gradient(ci_lo, tgrid)
-inc_hi = np.maximum(0.0, -dy_lo)  # 상한(증가량 관점)
-inc_lo = np.maximum(0.0, -dy_hi)  # 하한
 
 def band_plot(ax, loT, hiT, label):
     mask = (tgrid>=loT) & (tgrid<=hiT)
@@ -293,7 +309,7 @@ def band_plot(ax, loT, hiT, label):
     fig.add_trace(go.Scatter(
         x=np.r_[tgrid[mask], tgrid[mask][::-1]],
         y=np.r_[inc_hi[mask], inc_lo[mask][::-1]],
-        fill="toself", name="95% CI", line=dict(color="rgba(0,0,0,0)"),
+        fill="toself", name="5% CI (±)", line=dict(color="rgba(0,0,0,0)"),
         fillcolor="rgba(0,123,255,0.15)", hoverinfo="skip"
     ))
     fig.add_trace(go.Scatter(
@@ -323,13 +339,18 @@ figE.add_trace(go.Scatter(
     line=dict(width=3),
     hovertemplate="T=%{x:.2f}℃<br>증가량=%{y:,.0f} MJ/℃<extra></extra>"
 ))
-# 영역 표기
-figE.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.12, line_width=0,
-               annotation_text=f"Heating Slowdown (≤ {T_slow:.2f}℃)", annotation_position="top left")
-figE.add_vrect(x0=T_slow, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.12, line_width=0,
-               annotation_text=f"Heating Start ({T_slow:.2f}~{theta_star:.2f}℃)", annotation_position="top left")
-figE.add_vline(x=theta_star, line_dash="dash", line_color="black",
-               annotation_text=f"Start θ* {theta_star:.2f}℃", annotation_position="bottom right")
+# 영역은 shape로만, 텍스트는 plot 바깥으로
+figE.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.12, line_width=0, layer="below")
+figE.add_vrect(x0=T_slow, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.12, line_width=0, layer="below")
+figE.add_vline(x=theta_star, line_dash="dash", line_color="black")
+
+figE.add_annotation(x=(xmin_vis+T_slow)/2,  y=1.06, xref="x", yref="paper",
+                    text=f"Heating Slowdown (≤ {T_slow:.2f}℃)", showarrow=False, font=dict(size=12))
+figE.add_annotation(x=(T_slow+theta_star)/2, y=1.06, xref="x", yref="paper",
+                    text=f"Heating Start ({T_slow:.2f}~{theta_star:.2f}℃)", showarrow=False, font=dict(size=12))
+figE.add_annotation(x=theta_star, y=1.10, xref="x", yref="paper",
+                    text=f"Start θ* {theta_star:.2f}℃", showarrow=False, font=dict(size=12))
+
 figE.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
                    margin=dict(l=40,r=20,t=40,b=40),
                    xaxis=dict(title="Temperature (℃)", range=[xmin_vis, xmax_vis]),
@@ -341,8 +362,14 @@ st.plotly_chart(figE, use_container_width=True, config={"displaylogo": False})
 st.subheader("F. 결과 다운로드")
 @st.cache_data(show_spinner=False)
 def build_xlsx_bytes():
+    # 엔진: xlsxwriter 우선, 없으면 openpyxl 폴백
+    try:
+        import xlsxwriter  # noqa
+        engine = "xlsxwriter"
+    except Exception:
+        engine = "openpyxl"
     buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="xlsxwriter") as wr:
+    with pd.ExcelWriter(buf, engine=engine) as wr:
         # 1) 요약
         summary = pd.DataFrame({
             "항목":["식(Poly-3)","R²","Start θ*","Slowdown","Saturation(추정)"],
@@ -356,9 +383,10 @@ def build_xlsx_bytes():
             "Band":["−5~0℃","0~5℃","5~10℃"],
             "Δ1℃ 증가량(MJ/℃)":[avg_m5_0, avg_0_5, avg_5_10]
         }).to_excel(wr, index=False, sheet_name="Band_Average")
-        # 4) 세부곡선(양수 증가량)
-        pd.DataFrame({"T(℃)":tgrid, "Δ1℃ 증가량(MJ/℃)":minus_d1,
-                      "CI_lo":inc_lo, "CI_hi":inc_hi}).to_excel(wr, index=False, sheet_name="Curve")
+        # 4) 세부곡선(양수 증가량 + 5% CI)
+        pd.DataFrame({"T(℃)":tgrid,
+                      "Δ1℃ 증가량(MJ/℃)":minus_d1,
+                      "CI_lo(5%)":inc_lo, "CI_hi(5%)":inc_hi}).to_excel(wr, index=False, sheet_name="Curve")
     buf.seek(0)
     return buf.getvalue()
 
@@ -369,4 +397,4 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-st.caption("툴팁 값은 ‘증가량(−dQ/dT)’을 **양수**로 표기해 의사결정에 직관적으로 사용 가능하게 구성.")
+st.caption("툴팁 값은 ‘증가량(−dQ/dT)’을 **양수**로 표기. 구간 그래프의 파란 음영은 **5% CI(≈90% 신뢰구간)**.")
