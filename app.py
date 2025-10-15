@@ -1,4 +1,4 @@
-# app.py — HeatBand Insight (2025-10-14, T_cap/0값수정/요약표 강화)
+# app.py — HeatBand Insight (2025-10-14, T_cap/0값수정/요약표 강화 + 안전 로더 적용)
 # 단위: 공급량(MJ), 변화율 dQ/dT(MJ/℃)
 
 import os
@@ -168,23 +168,43 @@ def make_derivative_figure(tgrid, d1, theta_star, T_slow, T_cap, xmin_vis, xmax_
                       annotation_text="Saturation Zone", annotation_position="bottom left")
     fig.add_vline(x=theta_star, line_dash="dash", line_color="steelblue",
                   annotation_text=f"Start θ*={theta_star:.2f}℃", annotation_position="top right")
-    fig.add_vrect(x0=T_slow, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.14, line_width=0,
-                  annotation_text="Heating Start Zone", annotation_position="top right")
+    if np.isfinite(T_slow) and np.isfinite(theta_star):
+        fig.add_vrect(x0=T_slow, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.14, line_width=0,
+                      annotation_text="Heating Start Zone", annotation_position="top right")
     fig.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
                       margin=dict(l=40,r=20,t=50,b=40), hovermode="x unified",
                       xaxis=dict(title="기온(℃)", range=[xmin_vis, xmax_vis]),
                       yaxis=dict(title=y_title, tickformat=","), title="Rate of Change vs Temperature — HeatBand")
     return fig
 
+# ── Excel Loader (safe) ─────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def read_excel_cached(path_or_buf) -> pd.DataFrame:
+    """안전 로더: 'data' 시트 우선, 없으면 첫 시트 자동."""
+    try:
+        import openpyxl  # noqa: F401
+        engine = None
+    except Exception:
+        engine = "openpyxl"
+    try:
+        try:
+            return pd.read_excel(path_or_buf, sheet_name="data", engine=engine)
+        except Exception:
+            xls = pd.ExcelFile(path_or_buf, engine=engine)
+            return pd.read_excel(xls, sheet_name=xls.sheet_names[0])
+    except Exception as e:
+        st.error(f"엑셀을 읽는 중 문제가 발생했어: {type(e).__name__} — {e}")
+        st.stop()
+
 # ── Data in ──────────────────────────────────────────────────
 st.sidebar.header("① 데이터")
 repo_file = "실적.xlsx"
 uploaded = st.sidebar.file_uploader("엑셀(.xlsx) 업로드 (없으면 리포지토리 파일 사용)", type=["xlsx"])
 if uploaded is not None:
-    raw = load_excel(uploaded)
+    raw = read_excel_cached(uploaded)
 elif os.path.exists(repo_file):
     st.sidebar.info("리포지토리의 '실적.xlsx' 자동 사용 중")
-    raw = load_excel(repo_file)
+    raw = read_excel_cached(repo_file)
 else:
     st.info("엑셀을 업로드하거나 리포지토리에 '실적.xlsx'를 넣어줘.")
     st.stop()
