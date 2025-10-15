@@ -1,4 +1,4 @@
-# app.py — HeatBand Insight (simplified deck for execs · restore A/B · pretty charts · bottom matplotlib)
+# app.py — HeatBand Insight (exec-summary + dynamic bands + restored start/slowdown)
 # 단위: 공급량(MJ), 변화율 dQ/dT(MJ/℃)
 
 import os
@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import matplotlib.font_manager as fm
-import matplotlib.pyplot as plt
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
 import streamlit as st
@@ -19,7 +18,6 @@ FONT_PATH = "NanumGothic-Regular.ttf"
 if os.path.exists(FONT_PATH):
     try:
         fm.fontManager.addfont(FONT_PATH)
-        plt.rcParams["font.family"] = "NanumGothic"
     except Exception:
         pass
 PLOT_FONT = "NanumGothic, Arial, Noto Sans KR, sans-serif"
@@ -116,12 +114,24 @@ def df_commas(df, except_cols=None):
             out[c] = out[c].apply(fmt_int)
     return out
 
+# 안전평가(월 모델 범위 밖 → 글로벌 모델)
+def safe_delta1c(t0: float, month_df: pd.DataFrame, month_model, month_pf,
+                 global_model, global_pf) -> float:
+    if len(month_df) < 6:
+        dqdT = poly3_d1_at(global_model, global_pf, t0)
+    else:
+        tmin, tmax = float(month_df["temp"].min()), float(month_df["temp"].max())
+        if (t0 < tmin) or (t0 > tmax):
+            dqdT = poly3_d1_at(global_model, global_pf, t0)
+        else:
+            dqdT = poly3_d1_at(month_model, month_pf, t0)
+    return max(0.0, -dqdT)
+
 # ── Excel Loader (safe) ─────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def read_excel_cached(path_or_buf) -> pd.DataFrame:
-    """'data' 시트 우선, 없으면 첫 시트."""
     try:
-        import openpyxl  # noqa: F401
+        import openpyxl  # noqa
         engine = None
     except Exception:
         engine = "openpyxl"
@@ -191,15 +201,13 @@ if df_train.empty:
 
 # ── θ* 탐색 ─────────────────────────────────────────────────
 th_min, th_max, th_step = 0.0, 20.0, 0.1
-
-# 시각 구간
 T_train = df_train["temp"].values
 p1, p99 = np.percentile(T_train, 1), np.percentile(T_train, 99)
 pad = 1.5
 xmin_vis = float(np.floor(p1 - pad))
 xmax_vis = float(np.ceil(min(25.0, p99 + pad)))
 
-# ── A0: Poly-3 상관(업그레이드 스타일) ─────────────────────
+# ── A0: Poly-3 상관(고급 스타일) ────────────────────────────
 st.subheader(f"A0. 기온–공급량 상관(Poly-3) — 대상: {target_choice}")
 x_tr = df_train["temp"].values
 y_tr = df_train[target_col].values
@@ -209,21 +217,14 @@ r2 = poly3_r2(y_tr, yhat_tr)
 tgrid0 = np.linspace(xmin_vis, xmax_vis, 500)
 y_pred0 = poly3_predict(m_all, pf_all, tgrid0)
 ci_lo, ci_hi = poly3_conf_band(x_tr, y_tr, tgrid0, m_all, pf_all)
-
 a,b,c,d = poly3_coeffs(m_all)
 eq_str = nice_poly_string(a,b,c,d, digits=1)
 
 fig_corr = go.Figure()
 fig_corr.add_trace(go.Scatter(
     x=df_train["temp"], y=df_train[target_col], mode="markers", name="학습 샘플",
-    marker=dict(
-        size=9,
-        color=df_train["temp"],
-        colorscale="Blues",
-        line=dict(width=0.6, color="rgba(0,0,0,0.15)"),
-        opacity=0.9,
-        symbol="circle"
-    ),
+    marker=dict(size=9, color=df_train["temp"], colorscale="Blues",
+                line=dict(width=0.6, color="rgba(0,0,0,0.15)"), opacity=0.9),
     hovertemplate="T=%{x:.2f}℃<br>Q=%{y:,.0f} MJ<extra></extra>"
 ))
 fig_corr.add_traces([
@@ -233,23 +234,20 @@ fig_corr.add_traces([
                line=dict(color="rgba(31,119,180,0)"),
                fillcolor="rgba(31,119,180,0.18)", hoverinfo="skip")
 ])
-fig_corr.add_trace(go.Scatter(x=tgrid0, y=y_pred0, mode="lines", name="Poly-3",
-                              line=dict(width=3)))
-fig_corr.update_layout(
-    template="simple_white", font=dict(family=PLOT_FONT, size=14),
-    margin=dict(l=40,r=20,t=50,b=40),
-    xaxis=dict(title="기온(℃)", range=[xmin_vis, xmax_vis], zeroline=True, showgrid=True),
-    yaxis=dict(title="공급량(MJ)", tickformat=",", showgrid=True),
-    title=f"기온–공급량 상관(Train, R²={r2:.3f})"
-)
+fig_corr.add_trace(go.Scatter(x=tgrid0, y=y_pred0, mode="lines", name="Poly-3", line=dict(width=3)))
+fig_corr.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
+                       margin=dict(l=40,r=20,t=50,b=40),
+                       xaxis=dict(title="기온(℃)", range=[xmin_vis, xmax_vis]),
+                       yaxis=dict(title="공급량(MJ)", tickformat=","),
+                       title=f"기온–공급량 상관(Train, R²={r2:.3f})")
 fig_corr.add_annotation(xref="paper", yref="paper", x=0.01, y=0.02,
                         text=eq_str, showarrow=False,
                         bgcolor="rgba(255,255,255,0.85)", bordercolor="rgba(0,0,0,0.3)",
                         borderwidth=1, font=dict(size=12))
 st.plotly_chart(fig_corr, use_container_width=True, config={"displaylogo": False})
 
-# ── A: Heating Start(복원) ───────────────────────────────────
-st.subheader(f"A. Heating Start Zone — 베이스온도(θ*) · 대상: {target_choice}")
+# ── A: Heating Start (복원) ──────────────────────────────────
+st.subheader(f"A. Heating Start Zone — 베이스온도(θ*)")
 theta_star, a_hat, b_hat = hinge_base_temp(df_train["temp"].values, df_train[target_col].values,
                                            th_min, th_max, th_step)
 st.metric("베이스온도 θ*", f"{theta_star:.2f} ℃")
@@ -260,12 +258,10 @@ def make_start_figure(df_all_in, df_train_in, theta_star, a_hat, b_hat, xmin_vis
     qhat = a_hat + b_hat*H
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df_all_in["temp"], y=df_all_in["Q"], mode="markers", name="전체 실측(참고)",
-                             marker=dict(size=6, color="rgba(0,0,0,0.15)"), opacity=0.35,
-                             hovertemplate="T=%{x:.2f}℃<br>Q=%{y:,.0f} MJ<extra></extra>"))
+                             marker=dict(size=6, color="rgba(0,0,0,0.15)"), opacity=0.35))
     fig.add_trace(go.Scatter(x=df_train_in["temp"], y=df_train_in["Q"], mode="markers", name="학습 실측",
                              marker=dict(size=8, color="rgba(31,119,180,0.9)",
-                                         line=dict(width=0.5, color="rgba(0,0,0,0.2)")),
-                             hovertemplate="T=%{x:.2f}℃<br>Q=%{y:,.0f} MJ<extra></extra>"))
+                                         line=dict(width=0.5, color="rgba(0,0,0,0.2)"))))
     fig.add_trace(go.Scatter(x=tline, y=qhat, mode="lines", name="힌지 적합(훈련)", line=dict(width=3)))
     fig.add_vline(x=theta_star, line_dash="dash",
                   annotation_text=f"θ* = {theta_star:.2f}℃", annotation_position="top right")
@@ -284,7 +280,7 @@ st.plotly_chart(
     use_container_width=True, config={"displaylogo": False}
 )
 
-# ── B: Heating Slowdown & dQ/dT(복원) ────────────────────────
+# ── B: Heating Slowdown & dQ/dT (복원) ───────────────────────
 st.subheader("B. Heating Slowdown Zone & dQ/dT (Poly-3)")
 m_poly, pf_poly, _ = fit_poly3(df_train["temp"].values, df_train[target_col].values)
 tgrid = np.linspace(xmin_vis, xmax_vis, 800)
@@ -318,7 +314,8 @@ st.plotly_chart(
     use_container_width=True, config={"displaylogo": False}
 )
 
-# ── C: 구간별 Δ1℃ 증가량(−5~0 / 0~5 / 5~10) — 깔끔 막대 ──────
+# ── C: 경영 보고용 요약 블록 + 구간별 값 ─────────────────────
+# 구간 평균 Δ1℃(MJ/℃)
 def band_mean_from_model(temp_list: List[float], model, pf) -> float:
     vals = [max(0.0, -poly3_d1_at(model, pf, float(t0))) for t0 in temp_list]
     return float(np.mean(vals)) if vals else np.nan
@@ -327,31 +324,60 @@ mean_m5_0 = band_mean_from_model([-5,-4,-3,-2,-1,0], m_poly, pf_poly)
 mean_0_5  = band_mean_from_model([0,1,2,3,4,5], m_poly, pf_poly)
 mean_5_10 = band_mean_from_model([5,6,7,8,9,10], m_poly, pf_poly)
 
-st.subheader("C. 기온 구간별 Δ1℃ 증가량 요약 [MJ/℃]")
-bar = go.Figure()
-cats = ["−5~0℃", "0~5℃", "5~10℃"]
-vals = [mean_m5_0, mean_0_5, mean_5_10]
-bar.add_trace(go.Bar(x=cats, y=vals, text=[fmt_int(v) for v in vals],
-                     textposition="outside", marker=dict(line=dict(width=0), opacity=0.9)))
-bar.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
-                  margin=dict(l=40,r=20,t=50,b=40),
-                  yaxis=dict(title="Δ1℃ 증가량 (MJ/℃)", tickformat=","),
-                  xaxis=dict(title="기온 구간"),
-                  showlegend=False)
-st.plotly_chart(bar, use_container_width=True, config={"displaylogo": False})
+st.subheader("C. 요약(3차 다항식 & 기온구간별 1℃ 변화량)")
+with st.container(border=True):
+    st.markdown(
+        f"""
+**Polynomial Regression Equation (degree 3)**  
+**{nice_poly_string(a,b,c,d, digits=2)}**
 
-# ── D: (하단) Refined Gas Supply Rate of Change — Matplotlib ─
-st.subheader("D. Refined Gas Supply Rate of Change (Matplotlib)")
-fig, ax = plt.subplots(figsize=(9.5, 4.6), dpi=150)
-ax.plot(tgrid, d1, linewidth=2.5)  # 기본 색상(규정: 색 지정하지 않음)
-# 영역 채움
-ax.axvspan(xmin=xmin_vis, xmax=T_slow, alpha=0.12)   # slowdown zone
-ax.axvspan(xmin=T_slow, xmax=theta_star, alpha=0.08) # start zone
-# 라인
-ax.axvline(T_slow, linestyle="--", linewidth=1.8)
-ax.axvline(theta_star, linestyle="--", linewidth=1.8)
-ax.set_xlabel("Temperature (°C)")
-ax.set_ylabel("Rate of Change in Gas Supply (MJ/°C)")
-ax.set_title("Refined Gas Supply Rate of Change vs Temperature (Recalculated)")
-ax.grid(True, linewidth=0.3)
-st.pyplot(fig, clear_figure=True)
+- **Supply Increase (in MJ) when Temperature Decreases by 1°C from 10→5°C**: **{fmt_int(mean_5_10)} MJ**  
+- **Supply Increase (in MJ) when Temperature Decreases by 1°C from 5→0°C**: **{fmt_int(mean_0_5)} MJ**  
+- **Supply Increase (in MJ) when Temperature Decreases by 1°C from 0→−5°C**: **{fmt_int(mean_m5_0)} MJ**
+        """.strip()
+    )
+
+# ── D: 구간별 “동적 그래프” (세 탭) ──────────────────────────
+st.subheader("D. 기온 구간별 동적 그래프(−dQ/dT = 1℃ 하락 시 증가량)")
+tabs = st.tabs(["−5~0℃", "0~5℃", "5~10℃"])
+bands = [np.linspace(-5,0,61), np.linspace(0,5,61), np.linspace(5,10,61)]
+band_names = ["−5~0℃", "0~5℃", "5~10℃"]
+band_vals = [mean_m5_0, mean_0_5, mean_5_10]
+
+for i, tvec in enumerate(bands):
+    dvec = np.array([max(0.0, -poly3_d1_at(m_poly, pf_poly, float(t))) for t in tvec])
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=tvec, y=dvec, mode="lines+markers",
+                             marker=dict(size=5),
+                             name=f"Δ1℃ 증가량 (MJ/℃)",
+                             hovertemplate="T=%{x:.2f}℃<br>Δ1℃=%{y:,.0f} MJ/℃<extra></extra>"))
+    fig.add_hline(y=band_vals[i], line_dash="dot",
+                  annotation_text=f"Band Avg = {fmt_int(band_vals[i])} MJ/℃",
+                  annotation_position="top left")
+    fig.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
+                      margin=dict(l=40,r=20,t=50,b=40),
+                      xaxis=dict(title="기온(℃)"),
+                      yaxis=dict(title="Δ1℃ 증가량 (MJ/℃)", tickformat=","),
+                      showlegend=False,
+                      title=f"Band {band_names[i]} Response")
+    tabs[i].plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+
+# ── E: (하단) Refined Gas Supply Rate of Change — 동적 그래프 ─
+st.subheader("E. Refined Gas Supply Rate of Change (Dynamic)")
+fig_ref = go.Figure()
+fig_ref.add_trace(go.Scatter(x=tgrid, y=d1, mode="lines", name="Rate of Change (dQ/dT)",
+                             line=dict(width=3)))
+fig_ref.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.14, line_width=0,
+                  annotation_text=f"Heating Slowdown (≤ {T_slow:.2f}℃)", annotation_position="top left")
+fig_ref.add_vrect(x0=T_slow, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.14, line_width=0,
+                  annotation_text=f"Heating Start ({T_slow:.2f}~{theta_star:.2f}℃)", annotation_position="top right")
+fig_ref.add_vline(x=T_slow, line_dash="dash", line_color="red",
+                  annotation_text=f"Slowdown {T_slow:.2f}℃", annotation_position="bottom left")
+fig_ref.add_vline(x=theta_star, line_dash="dash", line_color="steelblue",
+                  annotation_text=f"Start θ* {theta_star:.2f}℃", annotation_position="bottom right")
+fig_ref.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
+                      margin=dict(l=40,r=20,t=50,b=40),
+                      xaxis=dict(title="Temperature (°C)", range=[xmin_vis, xmax_vis]),
+                      yaxis=dict(title="Rate of Change (MJ/°C)", tickformat=","),
+                      hovermode="x unified")
+st.plotly_chart(fig_ref, use_container_width=True, config={"displaylogo": False})
