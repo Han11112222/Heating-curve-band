@@ -181,7 +181,7 @@ auto_zoom = st.sidebar.toggle("밴드 자동 Y축 줌(곡률 강조)", value=Tru
 use_cold  = st.sidebar.toggle("저온 완화 적용(아주 낮은 온도에서 증가량 둔화)", value=True)
 T_cold    = st.sidebar.slider("저온 완화 시작온도 T_cold(℃)", -10.0, 5.0, -2.0, 0.1)
 tau       = st.sidebar.slider("완화 전이폭 τ(℃, 클수록 완만)", 0.5, 5.0, 1.5, 0.1)
-# ★ 수요곡선 곡률 강조
+# 수요곡선 곡률 강조
 curve_k   = st.sidebar.slider("수요곡선 곡률 강조(×)", 1.0, 4.0, 2.0, 0.1)
 
 def sigmoid(x): return 1/(1+np.exp(-x))
@@ -214,7 +214,7 @@ T_slow   = float(tgrid[int(np.argmin(deriv_mean))])             # 최저 기울�
 max_neg  = float(np.max(inc))
 T_cap    = float(tgrid[np.argmax(inc <= 0.02*max_neg)]) if max_neg>0 else np.nan
 
-# ========== ★ 곡선 힌지(큐빅) 적합 (섹션 B) ==========
+# ========== 곡선 힌지(큐빅) 적합 (섹션 B) ==========
 def fit_hinge_cubic(T: np.ndarray, Q: np.ndarray, theta: float) -> Tuple[float,float,float,float]:
     """
     Q ~ a + b*H + c*H^2 + d*H^3, H=max(theta - T, 0)
@@ -260,7 +260,7 @@ st.plotly_chart(figA, use_container_width=True, config={"displaylogo": False})
 # ── (B) 수요곡선 — 곡선 힌지 + 라벨 겹침 해결 ──────────────
 st.subheader("🧊 B. Heating Start / Slowdown — 수요곡선")
 tline = np.linspace(xmin_vis, xmax_vis, 600)
-qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, curve_k)  # ★ 곡선
+qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, curve_k)  # 곡선
 
 figB = go.Figure()
 figB.add_trace(go.Scatter(x=df["temp"], y=df["Q"], mode="markers", name="전체(참고)",
@@ -272,7 +272,6 @@ figB.add_trace(go.Scatter(
     line=dict(width=3, shape="spline", smoothing=1.1)
 ))
 
-# 영역/주석: 상단으로 띄우고, 반투명 배경으로 가독성 ↑
 figB.add_vrect(x0=xmin_vis, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.18, line_width=0, layer="below")
 figB.add_annotation(x=(xmin_vis+theta_star)/2, y=1.12, xref="x", yref="paper",
                     text="Heating Start Zone", showarrow=False,
@@ -291,12 +290,12 @@ if np.isfinite(T_cap):
                         text=f"Saturation {T_cap:.2f}℃", showarrow=False, font=dict(size=12),
                         bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
 
-# 범례를 하단으로 내려 겹침 제거
+# 범례 하단으로 이동(겹침 방지)
 figB.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
                    margin=dict(l=40,r=20,t=60,b=70),
                    xaxis=dict(title="기온(℃)", range=[xmin_vis, xmax_vis]),
                    yaxis=dict(title="공급량(MJ)", tickformat=","),
-                   legend=dict(orientation="h", yanchor="top", y=-0.18, x=0.01))  # ↓ bottom
+                   legend=dict(orientation="h", yanchor="top", y=-0.18, x=0.01))
 st.plotly_chart(figB, use_container_width=True, config={"displaylogo": False})
 
 # ── (C) 기온별 공급량 변화량 요약 ───────────────────────────
@@ -369,24 +368,55 @@ figE.add_trace(go.Scatter(
     line=dict(width=3, shape="spline", smoothing=1.2),
     hovertemplate="T=%{x:.2f}℃<br>증가량=%{y:,.0f} MJ/℃<extra></extra>"
 ))
+
+# 영역 음영
 figE.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.12, line_width=0, layer="below")
 figE.add_vrect(x0=T_slow, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.12, line_width=0, layer="below")
+
+# 상단 영역 라벨(플롯 밖 y=paper에 고정, 얇은 배경으로 가독성 ↑)
+def top_note(x, text, y=1.12):
+    figE.add_annotation(
+        x=x, y=y, xref="x", yref="paper", showarrow=False, text=text,
+        font=dict(size=12),
+        bgcolor="rgba(255,255,255,0.75)", bordercolor="rgba(0,0,0,0.12)", borderwidth=1
+    )
+
+top_note((xmin_vis+T_slow)/2,  f"Heating Slowdown (≤ {T_slow:.2f}℃)")
+top_note((T_slow+theta_star)/2, f"Heating Start ({T_slow:.2f}~{theta_star:.2f}℃)")
+
+# 기준선 표기
+figE.add_vline(x=theta_star, line_dash="dash", line_color="black")
+figE.add_annotation(x=theta_star, y=1.14, xref="x", yref="paper",
+                    text=f"Start θ* {theta_star:.2f}℃", showarrow=False,
+                    font=dict(size=12), bgcolor="rgba(255,255,255,0.75)",
+                    bordercolor="rgba(0,0,0,0.12)", borderwidth=1)
+
+# 저온 완화 라벨의 겹침 회피 로직
 if use_cold:
     figE.add_vline(x=T_cold, line_dash="dot", line_color="gray")
-    figE.add_annotation(x=T_cold, y=1.04, xref="x", yref="paper",
-                        text=f"저온 완화 시작 T_cold={T_cold:.1f}℃", showarrow=False, font=dict(size=12))
-figE.add_vline(x=theta_star, line_dash="dash", line_color="black")
-figE.add_annotation(x=(xmin_vis+T_slow)/2,  y=1.06, xref="x", yref="paper",
-                    text=f"Heating Slowdown (≤ {T_slow:.2f}℃)", showarrow=False, font=dict(size=12))
-figE.add_annotation(x=(T_slow+theta_star)/2, y=1.06, xref="x", yref="paper",
-                    text=f"Heating Start ({T_slow:.2f}~{theta_star:.2f}℃)", showarrow=False, font=dict(size=12))
-figE.add_annotation(x=theta_star, y=1.10, xref="x", yref="paper",
-                    text=f"Start θ* {theta_star:.2f}℃", showarrow=False, font=dict(size=12))
-figE.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
-                   margin=dict(l=40,r=20,t=40,b=40),
-                   xaxis=dict(title="Temperature (℃)", range=[xmin_vis, xmax_vis]),
-                   yaxis=dict(title="Rate of Change (MJ/℃, +가 증가)", tickformat=","),
-                   legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+    y_tcold = 1.10
+    xshift  = 0
+    # Heating Slowdown 라벨과 가까우면 위로
+    if T_cold <= (xmin_vis + 0.35*(T_slow - xmin_vis)):
+        y_tcold = 1.18
+    # 너무 왼쪽 끝이면 아래로 내리고 약간 오른쪽으로 민다
+    if T_cold <= xmin_vis + 0.8:
+        y_tcold = 1.06
+        xshift  = 28
+    figE.add_annotation(
+        x=T_cold, y=y_tcold, xref="x", yref="paper", xshift=xshift,
+        text=f"저온 완화시작 T_cold={T_cold:.1f}℃", showarrow=False,
+        font=dict(size=12), bgcolor="rgba(255,255,255,0.85)",
+        bordercolor="rgba(0,0,0,0.12)", borderwidth=1
+    )
+
+figE.update_layout(
+    template="simple_white", font=dict(family=PLOT_FONT, size=14),
+    margin=dict(l=40,r=20,t=40,b=40),
+    xaxis=dict(title="Temperature (℃)", range=[xmin_vis, xmax_vis]),
+    yaxis=dict(title="Rate of Change (MJ/℃, +가 증가)", tickformat=","),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0)
+)
 st.plotly_chart(figE, use_container_width=True, config={"displaylogo": False})
 
 # ── (F) XLSX 다운로드 ───────────────────────────────────────
@@ -424,4 +454,4 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-st.caption("섹션 B는 Q=a+b·H+c·H²+d·H³(곡률강조 ×k)로 적합하고, 범례는 하단으로 내려 상단 주석과 겹치지 않게 했습니다.")
+st.caption("섹션 B는 Q=a+b·H+c·H²+d·H³(곡률강조 ×k)로 적합, 섹션 E는 주석 자동 위치조정으로 겹침을 방지합니다.")
