@@ -146,7 +146,7 @@ if train.empty:
 # ── 시각 범위 ────────────────────────────────────────────────
 T = train["temp"].values
 p1, p99 = np.percentile(T, 1), np.percentile(T, 99)
-xmin_vis = float(np.floor(min(-5, p1 - 1.5)))
+xmin_vis = float(np.floor(min(-5, p1 - 1.5))))
 xmax_vis = float(np.ceil(max(25, p99 + 1.5)))
 
 # ── Poly-3 적합(전체) ────────────────────────────────────────
@@ -300,14 +300,29 @@ st.plotly_chart(figB, use_container_width=True, config={"displaylogo": False})
 
 # ── (C) 기온별 공급량 변화량 요약 ───────────────────────────
 st.subheader("🌡️ C. 기온별 공급량 변화량 요약")
-def band_mean(temp_array):
-    return float(np.mean(np.maximum(0.0, -np.array([d1_at(m_all, t) for t in temp_array]))))
+
+# 아래 함수가 섹션 D와 '정의'를 일치시킴(저온 완화 옵션 반영)
+def band_mean(temp_array, apply_cold=True):
+    temps = np.array(temp_array, dtype=float)
+    base = np.maximum(0.0, -np.array([d1_at(m_all, t) for t in temps]))  # Raw(Poly-3) 증가량
+    if apply_cold and use_cold:
+        cf = 1.0 / (1.0 + np.exp(-(temps - T_cold) / tau))               # cold_factor
+        base = base * cf
+    return float(np.mean(base))
+
 band = {"−5~0℃": np.arange(-5, 0.001, 0.1),
         "0~5℃" : np.arange(0, 5.001, 0.1),
         "5~10℃": np.arange(5,10.001,0.1)}
-avg_m5_0  = band_mean(band["−5~0℃"])
-avg_0_5   = band_mean(band["0~5℃"])
-avg_5_10  = band_mean(band["5~10℃"])
+
+# 그래프(D/E)와 동일 정의(저온 완화 반영)
+avg_m5_0  = band_mean(band["−5~0℃"], apply_cold=True)
+avg_0_5   = band_mean(band["0~5℃"],  apply_cold=True)
+avg_5_10  = band_mean(band["5~10℃"], apply_cold=True)
+
+# 비교 참고: 순수 Poly-3
+raw_m5_0  = band_mean(band["−5~0℃"], apply_cold=False)
+raw_0_5   = band_mean(band["0~5℃"],  apply_cold=False)
+raw_5_10  = band_mean(band["5~10℃"], apply_cold=False)
 
 st.markdown(
 f"""
@@ -317,6 +332,8 @@ f"""
 - **Supply ↑ per −1°C** from **10→5℃**: **{fmt_int(avg_5_10)} MJ/℃**  
 - **Supply ↑ per −1°C** from **5→0℃** : **{fmt_int(avg_0_5)} MJ/℃**  
 - **Supply ↑ per −1°C** from **0→−5℃**: **{fmt_int(avg_m5_0)} MJ/℃**
+
+<sub>Raw(Poly-3) 참고 → 10→5:{fmt_int(raw_5_10)}, 5→0:{fmt_int(raw_0_5)}, 0→−5:{fmt_int(raw_m5_0)} (MJ/℃)</sub>
 """
 )
 
@@ -396,10 +413,8 @@ if use_cold:
     figE.add_vline(x=T_cold, line_dash="dot", line_color="gray")
     y_tcold = 1.10
     xshift  = 0
-    # Heating Slowdown 라벨과 가까우면 위로
     if T_cold <= (xmin_vis + 0.35*(T_slow - xmin_vis)):
         y_tcold = 1.18
-    # 너무 왼쪽 끝이면 아래로 내리고 약간 오른쪽으로 민다
     if T_cold <= xmin_vis + 0.8:
         y_tcold = 1.06
         xshift  = 28
