@@ -146,7 +146,7 @@ if train.empty:
 # ── 시각 범위 ────────────────────────────────────────────────
 T = train["temp"].values
 p1, p99 = np.percentile(T, 1), np.percentile(T, 99)
-xmin_vis = float(np.floor(min(-5, p1 - 1.5)))   # ← 이전 오탈자 수정 반영
+xmin_vis = float(np.floor(min(-5, p1 - 1.5)))
 xmax_vis = float(np.ceil(max(25, p99 + 1.5)))
 
 # ── Poly-3 적합(전체) ────────────────────────────────────────
@@ -212,6 +212,24 @@ T_slow   = float(tgrid[int(np.argmin(deriv_mean))])             # 최저 기울�
 max_neg  = float(np.max(inc))
 T_cap    = float(tgrid[np.argmax(inc <= 0.02*max_neg)]) if max_neg>0 else np.nan
 
+# ========== ★ 곡선 힌지(Quadratic Hinge) 적합 (섹션 B용) ==========
+def fit_hinge_quadratic(T: np.ndarray, Q: np.ndarray, theta: float) -> Tuple[float,float,float]:
+    """
+    theta(난방 시작 온도)가 주어졌다고 보고, Q ~ a + b*H + c*H^2 (H=max(theta - T, 0)) 적합.
+    반환: (a, b, c)
+    """
+    H = np.clip(theta - T, 0, None)
+    X = np.column_stack([np.ones_like(H), H, H**2])
+    beta, *_ = np.linalg.lstsq(X, Q, rcond=None)
+    a_q, b_q, c_q = map(float, beta)
+    return a_q, b_q, c_q
+
+a_q, b_q, c_q = fit_hinge_quadratic(train["temp"].values, train["Q"].values, theta_star)
+
+def qhat_quadratic(t: np.ndarray, theta: float, a_q: float, b_q: float, c_q: float) -> np.ndarray:
+    H = np.clip(theta - t, 0, None)
+    return a_q + b_q*H + c_q*(H**2)
+
 # ── (A) 상관 그래프 ─────────────────────────────────────────
 st.subheader("🧮 A. 기온–공급량 상관 (Poly-3, 95% CI)")
 figA = go.Figure()
@@ -237,26 +255,31 @@ figA.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14)
                    title=f"R²={r2:.3f} · 식: {eq_str}")
 st.plotly_chart(figA, use_container_width=True, config={"displaylogo": False})
 
-# ── (B) 수요곡선(힌지) ──────────────────────────────────────
+# ── (B) 수요곡선 — 직선→곡선 표현 ──────────────────────────
 st.subheader("🧊 B. Heating Start / Slowdown — 수요곡선")
-tline = np.linspace(xmin_vis, xmax_vis, 320)
-H = np.clip(theta_star - tline, 0, None)
-qhat = a_hat + b_hat*H
+tline = np.linspace(xmin_vis, xmax_vis, 480)
+qhat_curve = qhat_quadratic(tline, theta_star, a_q, b_q, c_q)   # ★ 곡선 힌지 예측
+
 figB = go.Figure()
 figB.add_trace(go.Scatter(x=df["temp"], y=df["Q"], mode="markers", name="전체(참고)",
                           marker=dict(size=6, color="lightgray"), opacity=0.45))
 figB.add_trace(go.Scatter(x=train["temp"], y=train["Q"], mode="markers", name="학습",
-                          marker=dict(size=7)))
-figB.add_trace(go.Scatter(x=tline, y=qhat, mode="lines", name="힌지 적합"))
+                          marker=dict(size=7), marker_color="orange"))
+# ★ 곡선 힌지
+figB.add_trace(go.Scatter(
+    x=tline, y=qhat_curve, mode="lines", name="힌지(곡선) 적합",
+    line=dict(width=3, shape="spline", smoothing=1.1)
+))
+# 영역/주석은 기존 유지
 figB.add_vrect(x0=xmin_vis, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.18, line_width=0, layer="below")
 figB.add_annotation(x=(xmin_vis+theta_star)/2, y=1.06, xref="x", yref="paper",
                     text="Heating Start Zone", showarrow=False, font=dict(size=12))
-figB.add_vline(x=theta_star, line_dash="dash")
-figB.add_annotation(x=theta_star, y=1.10, xref="x", yref="paper",
-                    text=f"Start θ* = {theta_star:.2f}℃", showarrow=False, font=dict(size=12))
 figB.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.14, line_width=0, layer="below")
 figB.add_annotation(x=(xmin_vis+T_slow)/2, y=1.06, xref="x", yref="paper",
                     text=f"Heating Slowdown Zone (≤ {T_slow:.2f}℃)", showarrow=False, font=dict(size=12))
+figB.add_vline(x=theta_star, line_dash="dash")
+figB.add_annotation(x=theta_star, y=1.10, xref="x", yref="paper",
+                    text=f"Start θ* = {theta_star:.2f}℃", showarrow=False, font=dict(size=12))
 if np.isfinite(T_cap):
     figB.add_vline(x=T_cap, line_dash="dot")
     figB.add_annotation(x=T_cap, y=1.02, xref="x", yref="paper",
@@ -272,12 +295,9 @@ st.plotly_chart(figB, use_container_width=True, config={"displaylogo": False})
 st.subheader("🌡️ C. 기온별 공급량 변화량 요약")
 def band_mean(temp_array):
     return float(np.mean(np.maximum(0.0, -np.array([d1_at(m_all, t) for t in temp_array]))))
-
-band = {
-    "−5~0℃": np.arange(-5, 0.001, 0.1),
-    "0~5℃" : np.arange(0, 5.001, 0.1),
-    "5~10℃": np.arange(5,10.001,0.1),
-}
+band = {"−5~0℃": np.arange(-5, 0.001, 0.1),
+        "0~5℃" : np.arange(0, 5.001, 0.1),
+        "5~10℃": np.arange(5,10.001,0.1)}
 avg_m5_0  = band_mean(band["−5~0℃"])
 avg_0_5   = band_mean(band["0~5℃"])
 avg_5_10  = band_mean(band["5~10℃"])
@@ -303,7 +323,6 @@ def band_plot(ax, loT, hiT, label):
     y_mid = inc[mask]
     y_lo  = inc_lo[mask]
     y_hi  = inc_hi[mask]
-
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=np.r_[x, x[::-1]],
@@ -319,7 +338,6 @@ def band_plot(ax, loT, hiT, label):
     avg = float(np.mean(y_mid))
     fig.add_annotation(x=(loT+hiT)/2, y=np.max(y_hi),
                        text=f"Band Avg = {fmt_int(avg)} MJ/℃", showarrow=False, yshift=18)
-    # 자동 줌(곡률 강조)
     if auto_zoom:
         y_min, y_max = float(np.min(y_mid)), float(np.max(y_mid))
         pad = 0.08 * (y_max - y_min if y_max>y_min else max(1.0, y_max))
@@ -343,10 +361,8 @@ figE.add_trace(go.Scatter(
     line=dict(width=3, shape="spline", smoothing=1.2),
     hovertemplate="T=%{x:.2f}℃<br>증가량=%{y:,.0f} MJ/℃<extra></extra>"
 ))
-# 영역 표시
 figE.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.12, line_width=0, layer="below")
 figE.add_vrect(x0=T_slow, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.12, line_width=0, layer="below")
-# 저온 완화 시작선
 if use_cold:
     figE.add_vline(x=T_cold, line_dash="dot", line_color="gray")
     figE.add_annotation(x=T_cold, y=1.04, xref="x", yref="paper",
@@ -377,24 +393,18 @@ def build_xlsx_bytes():
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine=engine) as wr:
         summary = pd.DataFrame({
-            "항목":["식(Poly-3)","R²","Start θ*","Slowdown","Saturation(추정)",
-                   "T_cold(설정)","tau(설정)","Cold Attenuation 사용"],
-            "값":[eq_str, r2, theta_star, T_slow, T_cap,
-                 T_cold if use_cold else np.nan, tau if use_cold else np.nan, use_cold]
+            "항목":["식(Poly-3)","R²","Start θ*","Slowdown","Saturation(추정)"],
+            "값":[eq_str, r2, theta_star, T_slow, T_cap]
         })
         summary.to_excel(wr, index=False, sheet_name="Summary")
-        a0,b1,c2,d3 = a,b,c,d
-        pd.DataFrame({"a0":[a0], "b1":[b1], "c2":[c2], "d3":[d3]}).to_excel(wr, index=False, sheet_name="Coefficients")
+        pd.DataFrame({"a0":[a], "b1":[b], "c2":[c], "d3":[d]}).to_excel(wr, index=False, sheet_name="Coefficients")
         pd.DataFrame({
             "Band":["−5~0℃","0~5℃","5~10℃"],
-            "Δ1℃ 증가량(MJ/℃)":[band_mean(band["−5~0℃"]),
-                               band_mean(band["0~5℃"]),
-                               band_mean(band["5~10℃"])]
+            "Δ1℃ 증가량(MJ/℃)":[avg_m5_0, avg_0_5, avg_5_10]
         }).to_excel(wr, index=False, sheet_name="Band_Average")
         pd.DataFrame({"T(℃)":tgrid,
                       "Δ1℃ 증가량(MJ/℃)":inc,
-                      "CI_lo(5%)":inc_lo, "CI_hi(5%)":inc_hi,
-                      "Cold_Factor":cold_factor}).to_excel(wr, index=False, sheet_name="Curve")
+                      "CI_lo(5%)":inc_lo, "CI_hi(5%)":inc_hi}).to_excel(wr, index=False, sheet_name="Curve")
     buf.seek(0)
     return buf.getvalue()
 
@@ -405,4 +415,4 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-st.caption("곡선은 Poly-3에서 유도한 증가량(−dQ/dT)에 ‘저온 완화(사용자 설정)’를 곱해 현실적인 포화/둔화를 표현합니다.")
+st.caption("섹션 B는 Q=a+b·H+c·H² (H=max(θ*−T,0))의 곡선 힌지로 표현되어 난방구간에서 곡률이 또렷합니다.")
