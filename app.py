@@ -181,6 +181,8 @@ auto_zoom = st.sidebar.toggle("밴드 자동 Y축 줌(곡률 강조)", value=Tru
 use_cold  = st.sidebar.toggle("저온 완화 적용(아주 낮은 온도에서 증가량 둔화)", value=True)
 T_cold    = st.sidebar.slider("저온 완화 시작온도 T_cold(℃)", -10.0, 5.0, -2.0, 0.1)
 tau       = st.sidebar.slider("완화 전이폭 τ(℃, 클수록 완만)", 0.5, 5.0, 1.5, 0.1)
+# ★ 수요곡선 곡률 강조
+curve_k   = st.sidebar.slider("수요곡선 곡률 강조(×)", 1.0, 4.0, 2.0, 0.1)
 
 def sigmoid(x): return 1/(1+np.exp(-x))
 cold_factor = sigmoid((tgrid - T_cold)/tau) if use_cold else np.ones_like(tgrid)
@@ -212,23 +214,23 @@ T_slow   = float(tgrid[int(np.argmin(deriv_mean))])             # 최저 기울�
 max_neg  = float(np.max(inc))
 T_cap    = float(tgrid[np.argmax(inc <= 0.02*max_neg)]) if max_neg>0 else np.nan
 
-# ========== ★ 곡선 힌지(Quadratic Hinge) 적합 (섹션 B용) ==========
-def fit_hinge_quadratic(T: np.ndarray, Q: np.ndarray, theta: float) -> Tuple[float,float,float]:
+# ========== ★ 곡선 힌지(큐빅) 적합 (섹션 B) ==========
+def fit_hinge_cubic(T: np.ndarray, Q: np.ndarray, theta: float) -> Tuple[float,float,float,float]:
     """
-    theta(난방 시작 온도)가 주어졌다고 보고, Q ~ a + b*H + c*H^2 (H=max(theta - T, 0)) 적합.
-    반환: (a, b, c)
+    Q ~ a + b*H + c*H^2 + d*H^3, H=max(theta - T, 0)
     """
     H = np.clip(theta - T, 0, None)
-    X = np.column_stack([np.ones_like(H), H, H**2])
+    X = np.column_stack([np.ones_like(H), H, H**2, H**3])
     beta, *_ = np.linalg.lstsq(X, Q, rcond=None)
-    a_q, b_q, c_q = map(float, beta)
-    return a_q, b_q, c_q
+    a_c, b_c, c_c, d_c = map(float, beta)
+    return a_c, b_c, c_c, d_c
 
-a_q, b_q, c_q = fit_hinge_quadratic(train["temp"].values, train["Q"].values, theta_star)
+a_c, b_c, c_c, d_c = fit_hinge_cubic(train["temp"].values, train["Q"].values, theta_star)
 
-def qhat_quadratic(t: np.ndarray, theta: float, a_q: float, b_q: float, c_q: float) -> np.ndarray:
+def qhat_cubic(t: np.ndarray, theta: float, a_c: float, b_c: float, c_c: float, d_c: float, k: float) -> np.ndarray:
     H = np.clip(theta - t, 0, None)
-    return a_q + b_q*H + c_q*(H**2)
+    # 곡률 강조: 2·3차항에 k를 곱해 눈에 보이는 휨을 강화
+    return a_c + b_c*H + (k*c_c)*(H**2) + (k*d_c)*(H**3)
 
 # ── (A) 상관 그래프 ─────────────────────────────────────────
 st.subheader("🧮 A. 기온–공급량 상관 (Poly-3, 95% CI)")
@@ -255,40 +257,46 @@ figA.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14)
                    title=f"R²={r2:.3f} · 식: {eq_str}")
 st.plotly_chart(figA, use_container_width=True, config={"displaylogo": False})
 
-# ── (B) 수요곡선 — 직선→곡선 표현 ──────────────────────────
+# ── (B) 수요곡선 — 곡선 힌지 + 라벨 겹침 해결 ──────────────
 st.subheader("🧊 B. Heating Start / Slowdown — 수요곡선")
-tline = np.linspace(xmin_vis, xmax_vis, 480)
-qhat_curve = qhat_quadratic(tline, theta_star, a_q, b_q, c_q)   # ★ 곡선 힌지 예측
+tline = np.linspace(xmin_vis, xmax_vis, 600)
+qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, curve_k)  # ★ 곡선
 
 figB = go.Figure()
 figB.add_trace(go.Scatter(x=df["temp"], y=df["Q"], mode="markers", name="전체(참고)",
                           marker=dict(size=6, color="lightgray"), opacity=0.45))
 figB.add_trace(go.Scatter(x=train["temp"], y=train["Q"], mode="markers", name="학습",
                           marker=dict(size=7), marker_color="orange"))
-# ★ 곡선 힌지
 figB.add_trace(go.Scatter(
     x=tline, y=qhat_curve, mode="lines", name="힌지(곡선) 적합",
     line=dict(width=3, shape="spline", smoothing=1.1)
 ))
-# 영역/주석은 기존 유지
+
+# 영역/주석: 상단으로 띄우고, 반투명 배경으로 가독성 ↑
 figB.add_vrect(x0=xmin_vis, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.18, line_width=0, layer="below")
-figB.add_annotation(x=(xmin_vis+theta_star)/2, y=1.06, xref="x", yref="paper",
-                    text="Heating Start Zone", showarrow=False, font=dict(size=12))
+figB.add_annotation(x=(xmin_vis+theta_star)/2, y=1.12, xref="x", yref="paper",
+                    text="Heating Start Zone", showarrow=False,
+                    font=dict(size=12), bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
 figB.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.14, line_width=0, layer="below")
-figB.add_annotation(x=(xmin_vis+T_slow)/2, y=1.06, xref="x", yref="paper",
-                    text=f"Heating Slowdown Zone (≤ {T_slow:.2f}℃)", showarrow=False, font=dict(size=12))
+figB.add_annotation(x=(xmin_vis+T_slow)/2, y=1.12, xref="x", yref="paper",
+                    text=f"Heating Slowdown Zone (≤ {T_slow:.2f}℃)", showarrow=False,
+                    font=dict(size=12), bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
 figB.add_vline(x=theta_star, line_dash="dash")
-figB.add_annotation(x=theta_star, y=1.10, xref="x", yref="paper",
-                    text=f"Start θ* = {theta_star:.2f}℃", showarrow=False, font=dict(size=12))
+figB.add_annotation(x=theta_star, y=1.14, xref="x", yref="paper",
+                    text=f"Start θ* = {theta_star:.2f}℃", showarrow=False, font=dict(size=12),
+                    bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
 if np.isfinite(T_cap):
     figB.add_vline(x=T_cap, line_dash="dot")
-    figB.add_annotation(x=T_cap, y=1.02, xref="x", yref="paper",
-                        text=f"Saturation {T_cap:.2f}℃", showarrow=False, font=dict(size=12))
+    figB.add_annotation(x=T_cap, y=1.10, xref="x", yref="paper",
+                        text=f"Saturation {T_cap:.2f}℃", showarrow=False, font=dict(size=12),
+                        bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
+
+# 범례를 하단으로 내려 겹침 제거
 figB.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
-                   margin=dict(l=40,r=20,t=40,b=40),
+                   margin=dict(l=40,r=20,t=60,b=70),
                    xaxis=dict(title="기온(℃)", range=[xmin_vis, xmax_vis]),
                    yaxis=dict(title="공급량(MJ)", tickformat=","),
-                   legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+                   legend=dict(orientation="h", yanchor="top", y=-0.18, x=0.01))  # ↓ bottom
 st.plotly_chart(figB, use_container_width=True, config={"displaylogo": False})
 
 # ── (C) 기온별 공급량 변화량 요약 ───────────────────────────
@@ -393,8 +401,9 @@ def build_xlsx_bytes():
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine=engine) as wr:
         summary = pd.DataFrame({
-            "항목":["식(Poly-3)","R²","Start θ*","Slowdown","Saturation(추정)"],
-            "값":[eq_str, r2, theta_star, T_slow, T_cap]
+            "항목":["식(Poly-3)","R²","Start θ*","Slowdown","Saturation(추정)",
+                   "곡선힌지 곡률강조 배율(k)"],
+            "값":[eq_str, r2, theta_star, T_slow, T_cap, curve_k]
         })
         summary.to_excel(wr, index=False, sheet_name="Summary")
         pd.DataFrame({"a0":[a], "b1":[b], "c2":[c], "d3":[d]}).to_excel(wr, index=False, sheet_name="Coefficients")
@@ -415,4 +424,4 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-st.caption("섹션 B는 Q=a+b·H+c·H² (H=max(θ*−T,0))의 곡선 힌지로 표현되어 난방구간에서 곡률이 또렷합니다.")
+st.caption("섹션 B는 Q=a+b·H+c·H²+d·H³(곡률강조 ×k)로 적합하고, 범례는 하단으로 내려 상단 주석과 겹치지 않게 했습니다.")
