@@ -82,6 +82,15 @@ def fmt_int(x):
     try: return f"{int(np.round(float(x))):,}"
     except Exception: return str(x)
 
+# ★ 로컬 곡선 강조용: 밴드 내 증가량에 Poly-2 재적합해 곡률 강화
+def fit_poly2_curve(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    # x, y는 밴드 내부의 (tgrid, −dQ/dT(>=0)) 샘플
+    if len(x) < 3:  # 안전장치
+        return y
+    coefs = np.polyfit(x, y, deg=2)         # a2*x^2 + a1*x + a0
+    yhat  = np.polyval(coefs, x)
+    return yhat
+
 # 난방시작(θ*) 추정: 1절편+힌지
 def hinge_base_temp(T: np.ndarray, Q: np.ndarray,
                     grid_min: float=0.0, grid_max: float=20.0, step: float=0.1) -> Tuple[float, float, float]:
@@ -164,7 +173,7 @@ if train.empty:
 # 시각 범위
 T = train["temp"].values
 p1, p99 = np.percentile(T, 1), np.percentile(T, 99)
-xmin_vis = float(np.floor(min(-5, p1 - 1.5)))
+xmin_vis = float(np.floor(min(-5, p1 - 1.5))))
 xmax_vis = float(np.ceil(max(25, p99 + 1.5)))
 
 # ── Poly-3 적합(전체) ────────────────────────────────────────
@@ -287,29 +296,39 @@ def band_plot(ax, loT, hiT, label):
     # 밴드도 고해상도 샘플링
     mask = (tgrid>=loT) & (tgrid<=hiT)
     x = tgrid[mask]
-    y_mid = minus_d1[mask]
+    y_mid_raw = minus_d1[mask]      # 원 파생치(증가량)
     y_lo  = inc_lo[mask]
     y_hi  = inc_hi[mask]
 
+    # ★ 곡률 강조: 밴드 내부 증가량에 대해 Poly-2 로컬 피팅
+    y_mid_smooth = fit_poly2_curve(x, y_mid_raw)
+
     fig = go.Figure()
+    # CI 영역(곡선과 같이 자연스럽게 표시)
     fig.add_trace(go.Scatter(
         x=np.r_[x, x[::-1]],
         y=np.r_[y_hi, y_lo[::-1]],
         fill="toself", name="5% CI (±)", line=dict(color="rgba(0,0,0,0)"),
         fillcolor="rgba(0,123,255,0.15)", hoverinfo="skip"
     ))
-    # ★ 곡선 렌더링: spline + smoothing
+    # 원 데이터(얇은 회색): 참고용
     fig.add_trace(go.Scatter(
-        x=x, y=y_mid, mode="lines", name="증가량(MJ/℃)",
-        line=dict(width=3, shape="spline", smoothing=1.2),
+        x=x, y=y_mid_raw, mode="lines", name="원데이터(참고)",
+        line=dict(width=1, dash="dot", color="rgba(0,0,0,0.35)"),
+        hoverinfo="skip", showlegend=False
+    ))
+    # ★ 중앙선: Poly-2 스무딩 + spline 렌더링 → 곡선 시각 강조
+    fig.add_trace(go.Scatter(
+        x=x, y=y_mid_smooth, mode="lines", name="증가량(MJ/℃)",
+        line=dict(width=3, shape="spline", smoothing=0.9),
         hovertemplate="T=%{x:.2f}℃<br>증가량=%{y:,.0f} MJ/℃<extra></extra>"
     ))
-    avg = float(np.mean(y_mid))
-    fig.add_annotation(x=(loT+hiT)/2, y=np.max(y_mid),
+    avg = float(np.mean(y_mid_raw))
+    fig.add_annotation(x=(loT+hiT)/2, y=np.max(y_hi),
                        text=f"Band Avg = {fmt_int(avg)} MJ/℃", showarrow=False, yshift=20)
     fig.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
                       margin=dict(l=40,r=20,t=40,b=40),
-                      xaxis=dict(title="기온(℃)"),
+                      xaxis=dict(title="기온(℃)", range=[loT, hiT]),
                       yaxis=dict(title="Δ1℃ 증가량(MJ/℃)", tickformat=","),
                       title=f"Band {label} Response")
     ax.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
@@ -376,4 +395,4 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-st.caption("구간 그래프의 주황색 선은 동일 데이터를 spline으로 렌더링해 **곡선**으로 표시.")
+st.caption("구간 그래프의 주황색 선은 밴드 내부 증가량에 Poly-2 로컬 피팅을 적용하고 spline으로 렌더링해 **곡선**으로 표시.")
