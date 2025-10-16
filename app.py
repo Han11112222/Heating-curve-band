@@ -164,7 +164,7 @@ ci_lo_95, ci_hi_95, y_pred, sigma2, XtX_inv = conf_band_y(
 
 # ── 도함수(민감도) ───────────────────────────────────────────
 J = np.vstack([np.ones_like(tgrid)*0, np.ones_like(tgrid), 2*tgrid, 3*(tgrid**2)]).T
-deriv_mean = np.array([d1_at(m_all, t) for t in tgrid])       # dQ/dT (음수 가능)
+deriv_mean = np.array([d1_at(m_all, t) for t in tgrid])       # dQ/dT
 deriv_se   = np.sqrt(np.sum(J @ XtX_inv * J, axis=1) * sigma2)
 z90 = 1.645
 d_lo = deriv_mean - z90*deriv_se
@@ -260,7 +260,7 @@ st.plotly_chart(figA, use_container_width=True, config={"displaylogo": False})
 # ── (B) 수요곡선 — 곡선 힌지 + 라벨 겹침 해결 ──────────────
 st.subheader("🧊 B. Heating Start / Slowdown — 수요곡선")
 tline = np.linspace(xmin_vis, xmax_vis, 600)
-qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, curve_k)  # 곡선
+qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, curve_k)
 
 figB = go.Figure()
 figB.add_trace(go.Scatter(x=df["temp"], y=df["Q"], mode="markers", name="전체(참고)",
@@ -290,7 +290,6 @@ if np.isfinite(T_cap):
                         text=f"Saturation {T_cap:.2f}℃", showarrow=False, font=dict(size=12),
                         bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
 
-# 범례 하단으로 이동(겹침 방지)
 figB.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
                    margin=dict(l=40,r=20,t=60,b=70),
                    xaxis=dict(title="기온(℃)", range=[xmin_vis, xmax_vis]),
@@ -362,6 +361,10 @@ with tab3: band_plot(st, 5, 10, "5~10℃")
 
 # ── (E) 전체 곡선(저온 완화 포함) ───────────────────────────
 st.subheader("🧭 E. Refined Gas Supply Rate of Change (Dynamic)")
+
+# 헤더와 그래프 사이 여백(그래프를 더 아래로)
+st.markdown('<div style="height:22px"></div>', unsafe_allow_html=True)
+
 figE = go.Figure()
 figE.add_trace(go.Scatter(
     x=tgrid, y=inc, mode="lines", name="증가량(MJ/℃)",
@@ -373,8 +376,8 @@ figE.add_trace(go.Scatter(
 figE.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.12, line_width=0, layer="below")
 figE.add_vrect(x0=T_slow, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.12, line_width=0, layer="below")
 
-# 상단 영역 라벨(플롯 밖 y=paper에 고정, 얇은 배경으로 가독성 ↑)
-def top_note(x, text, y=1.12):
+# 상단 영역 라벨(플롯 밖 y=paper에 고정, 위치 살짝 더 낮춤)
+def top_note(x, text, y=1.08):
     figE.add_annotation(
         x=x, y=y, xref="x", yref="paper", showarrow=False, text=text,
         font=dict(size=12),
@@ -386,22 +389,20 @@ top_note((T_slow+theta_star)/2, f"Heating Start ({T_slow:.2f}~{theta_star:.2f}�
 
 # 기준선 표기
 figE.add_vline(x=theta_star, line_dash="dash", line_color="black")
-figE.add_annotation(x=theta_star, y=1.14, xref="x", yref="paper",
+figE.add_annotation(x=theta_star, y=1.12, xref="x", yref="paper",
                     text=f"Start θ* {theta_star:.2f}℃", showarrow=False,
                     font=dict(size=12), bgcolor="rgba(255,255,255,0.75)",
                     bordercolor="rgba(0,0,0,0.12)", borderwidth=1)
 
-# 저온 완화 라벨의 겹침 회피 로직
+# 저온 완화 라벨의 겹침 회피 로직(유지)
 if use_cold:
     figE.add_vline(x=T_cold, line_dash="dot", line_color="gray")
-    y_tcold = 1.10
+    y_tcold = 1.06
     xshift  = 0
-    # Heating Slowdown 라벨과 가까우면 위로
     if T_cold <= (xmin_vis + 0.35*(T_slow - xmin_vis)):
-        y_tcold = 1.18
-    # 너무 왼쪽 끝이면 아래로 내리고 약간 오른쪽으로 민다
+        y_tcold = 1.10
     if T_cold <= xmin_vis + 0.8:
-        y_tcold = 1.06
+        y_tcold = 1.04
         xshift  = 28
     figE.add_annotation(
         x=T_cold, y=y_tcold, xref="x", yref="paper", xshift=xshift,
@@ -412,7 +413,8 @@ if use_cold:
 
 figE.update_layout(
     template="simple_white", font=dict(family=PLOT_FONT, size=14),
-    margin=dict(l=40,r=20,t=40,b=40),
+    # 상단 마진을 크게 잡아 그래프를 더 아래로
+    margin=dict(l=40,r=20,t=140,b=40),
     xaxis=dict(title="Temperature (℃)", range=[xmin_vis, xmax_vis]),
     yaxis=dict(title="Rate of Change (MJ/℃, +가 증가)", tickformat=","),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0)
@@ -454,4 +456,4 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-st.caption("섹션 B는 Q=a+b·H+c·H²+d·H³(곡률강조 ×k)로 적합, 섹션 E는 주석 자동 위치조정으로 겹침을 방지합니다.")
+st.caption("섹션 B는 Q=a+b·H+c·H²+d·H³(곡률강조 ×k)로 적합, 섹션 E는 여백 확대로 헤더와 라벨 겹침을 방지합니다.")
