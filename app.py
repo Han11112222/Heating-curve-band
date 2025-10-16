@@ -146,7 +146,7 @@ if train.empty:
 # ── 시각 범위 ────────────────────────────────────────────────
 T = train["temp"].values
 p1, p99 = np.percentile(T, 1), np.percentile(T, 99)
-xmin_vis = float(np.floor(min(-5, p1 - 1.5))))
+xmin_vis = float(np.floor(min(-5, p1 - 1.5)))
 xmax_vis = float(np.ceil(max(25, p99 + 1.5)))
 
 # ── Poly-3 적합(전체) ────────────────────────────────────────
