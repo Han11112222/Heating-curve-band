@@ -170,10 +170,17 @@ z90 = 1.645
 d_lo = deriv_mean - z90*deriv_se
 d_hi = deriv_mean + z90*deriv_se
 
-# 증가량(양수화)
-base_inc   = np.maximum(0.0, -deriv_mean)
-base_lo    = np.maximum(0.0, -d_hi)   # 하한(증가량 관점)
-base_hi    = np.maximum(0.0, -d_lo)   # 상한
+# ── 부드러운 ReLU(0 부근 꺾임 제거) ─────────────────────────
+def smooth_relu(x, eps):
+    # 0.5*(x + sqrt(x^2 + eps^2)) : x<0이면 ~0, x>0이면 x, 0 부근이 매끈
+    return 0.5 * (x + np.sqrt(x*x + eps*eps))
+
+eps_rel = 0.015 * max(1.0, float(np.nanmax(np.abs(deriv_mean))))  # 데이터 스케일 기반
+
+# 증가량(양수화) — hard ReLU 대신 soft ReLU 사용
+base_inc = smooth_relu(-deriv_mean, eps_rel)
+base_lo  = smooth_relu(-d_hi, eps_rel)  # 하한(증가량 관점)
+base_hi  = smooth_relu(-d_lo, eps_rel)  # 상한
 
 # ── 저온 완화(Attenuation) 옵션 ─────────────────────────────
 st.sidebar.header("④ 시뮬레이션 옵션")
@@ -181,15 +188,21 @@ auto_zoom = st.sidebar.toggle("밴드 자동 Y축 줌(곡률 강조)", value=Tru
 use_cold  = st.sidebar.toggle("저온 완화 적용(아주 낮은 온도에서 증가량 둔화)", value=True)
 T_cold    = st.sidebar.slider("저온 완화 시작온도 T_cold(℃)", -10.0, 5.0, -2.0, 0.1)
 tau       = st.sidebar.slider("완화 전이폭 τ(℃, 클수록 완만)", 0.5, 5.0, 1.5, 0.1)
-# 수요곡선 곡률 강조
 curve_k   = st.sidebar.slider("수요곡선 곡률 강조(×)", 1.0, 4.0, 2.0, 0.1)
 
 def sigmoid(x): return 1/(1+np.exp(-x))
-cold_factor = sigmoid((tgrid - T_cold)/tau) if use_cold else np.ones_like(tgrid)
+if use_cold:
+    cf = sigmoid((tgrid - T_cold)/tau)
+    # 0℃ 이상은 완화 없음, 과도 감쇠 방지(하한=0.6)
+    cf = np.where(tgrid >= 0, 1.0, cf)
+    cf = np.clip(cf, 0.6, 1.0)
+    cold_factor = cf
+else:
+    cold_factor = np.ones_like(tgrid)
 
-inc      = base_inc * cold_factor
-inc_lo   = base_lo  * cold_factor
-inc_hi   = base_hi  * cold_factor
+inc    = base_inc * cold_factor
+inc_lo = base_lo  * cold_factor
+inc_hi = base_hi  * cold_factor
 
 # ── 난방 시작/둔화/포화 ─────────────────────────────────────
 def hinge_base_temp(T: np.ndarray, Q: np.ndarray,
@@ -216,9 +229,6 @@ T_cap    = float(tgrid[np.argmax(inc <= 0.02*max_neg)]) if max_neg>0 else np.nan
 
 # ========== 곡선 힌지(큐빅) 적합 (섹션 B) ==========
 def fit_hinge_cubic(T: np.ndarray, Q: np.ndarray, theta: float) -> Tuple[float,float,float,float]:
-    """
-    Q ~ a + b*H + c*H^2 + d*H^3, H=max(theta - T, 0)
-    """
     H = np.clip(theta - T, 0, None)
     X = np.column_stack([np.ones_like(H), H, H**2, H**3])
     beta, *_ = np.linalg.lstsq(X, Q, rcond=None)
@@ -229,7 +239,6 @@ a_c, b_c, c_c, d_c = fit_hinge_cubic(train["temp"].values, train["Q"].values, th
 
 def qhat_cubic(t: np.ndarray, theta: float, a_c: float, b_c: float, c_c: float, d_c: float, k: float) -> np.ndarray:
     H = np.clip(theta - t, 0, None)
-    # 곡률 강조: 2·3차항에 k를 곱해 눈에 보이는 휨을 강화
     return a_c + b_c*H + (k*c_c)*(H**2) + (k*d_c)*(H**3)
 
 # ── (A) 상관 그래프 ─────────────────────────────────────────
@@ -260,7 +269,7 @@ st.plotly_chart(figA, use_container_width=True, config={"displaylogo": False})
 # ── (B) 수요곡선 — 곡선 힌지 + 라벨 겹침 해결 ──────────────
 st.subheader("🧊 B. Heating Start / Slowdown — 수요곡선")
 tline = np.linspace(xmin_vis, xmax_vis, 600)
-qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, curve_k)  # 곡선
+qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, curve_k)
 
 figB = go.Figure()
 figB.add_trace(go.Scatter(x=df["temp"], y=df["Q"], mode="markers", name="전체(참고)",
@@ -290,7 +299,6 @@ if np.isfinite(T_cap):
                         text=f"Saturation {T_cap:.2f}℃", showarrow=False, font=dict(size=12),
                         bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
 
-# 범례 하단으로 이동(겹침 방지)
 figB.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
                    margin=dict(l=40,r=20,t=60,b=70),
                    xaxis=dict(title="기온(℃)", range=[xmin_vis, xmax_vis]),
@@ -300,23 +308,34 @@ st.plotly_chart(figB, use_container_width=True, config={"displaylogo": False})
 
 # ── (C) 기온별 공급량 변화량 요약 ───────────────────────────
 st.subheader("🌡️ C. 기온별 공급량 변화량 요약")
-def band_mean(temp_array):
-    return float(np.mean(np.maximum(0.0, -np.array([d1_at(m_all, t) for t in temp_array]))))
+
+def band_mean(temp_array, apply_cold=True):
+    temps = np.array(temp_array, dtype=float)
+    base = smooth_relu(-np.array([d1_at(m_all, t) for t in temps]), eps_rel)  # Soft ReLU
+    if apply_cold and use_cold:
+        cf = 1.0 / (1.0 + np.exp(-(temps - T_cold) / tau))
+        cf = np.where(temps >= 0, 1.0, cf)  # 0℃ 이상 완화 X
+        cf = np.clip(cf, 0.6, 1.0)          # 하한
+        base = base * cf
+    return float(np.mean(base))
+
 band = {"−5~0℃": np.arange(-5, 0.001, 0.1),
         "0~5℃" : np.arange(0, 5.001, 0.1),
         "5~10℃": np.arange(5,10.001,0.1)}
-avg_m5_0  = band_mean(band["−5~0℃"])
-avg_0_5   = band_mean(band["0~5℃"])
-avg_5_10  = band_mean(band["5~10℃"])
 
+avg_m5_0  = band_mean(band["−5~0℃"], apply_cold=True)
+avg_0_5   = band_mean(band["0~5℃"],  apply_cold=True)
+avg_5_10  = band_mean(band["5~10℃"], apply_cold=True)
+
+# ★요청 순서: −5~0 → 0~5 → 5~10
 st.markdown(
 f"""
 **Polynomial Regression (degree 3)**  
 **{eq_str}**  
 
-- **Supply ↑ per −1°C** from **10→5℃**: **{fmt_int(avg_5_10)} MJ/℃**  
-- **Supply ↑ per −1°C** from **5→0℃** : **{fmt_int(avg_0_5)} MJ/℃**  
-- **Supply ↑ per −1°C** from **0→−5℃**: **{fmt_int(avg_m5_0)} MJ/℃**
+- **Supply ↑ per −1°C from 0→−5℃**: **{fmt_int(avg_m5_0)} MJ/℃**  
+- **Supply ↑ per −1°C from 5→0℃** : **{fmt_int(avg_0_5)} MJ/℃**  
+- **Supply ↑ per −1°C from 10→5℃**: **{fmt_int(avg_5_10)} MJ/℃**
 """
 )
 
@@ -354,7 +373,7 @@ def band_plot(ax, loT, hiT, label):
                       xaxis=dict(title="기온(℃)", range=[loT, hiT]),
                       yaxis=dict(title="Δ1℃ 증가량(MJ/℃)", tickformat=","),
                       title=f"Band {label} Response")
-    ax.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    ax.plotly_chart(fig, use_container_width=True, config={"displaylogo": False])
 
 with tab1: band_plot(st, -5, 0, "−5~0℃")
 with tab2: band_plot(st, 0, 5, "0~5℃")
@@ -373,7 +392,7 @@ figE.add_trace(go.Scatter(
 figE.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.12, line_width=0, layer="below")
 figE.add_vrect(x0=T_slow, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.12, line_width=0, layer="below")
 
-# 상단 영역 라벨(플롯 밖 y=paper에 고정, 얇은 배경으로 가독성 ↑)
+# 상단 영역 라벨
 def top_note(x, text, y=1.12):
     figE.add_annotation(
         x=x, y=y, xref="x", yref="paper", showarrow=False, text=text,
@@ -383,23 +402,32 @@ def top_note(x, text, y=1.12):
 
 top_note((xmin_vis+T_slow)/2,  f"Heating Slowdown (≤ {T_slow:.2f}℃)")
 top_note((T_slow+theta_star)/2, f"Heating Start ({T_slow:.2f}~{theta_star:.2f}℃)")
-
-# 기준선 표기
 figE.add_vline(x=theta_star, line_dash="dash", line_color="black")
 figE.add_annotation(x=theta_star, y=1.14, xref="x", yref="paper",
                     text=f"Start θ* {theta_star:.2f}℃", showarrow=False,
                     font=dict(size=12), bgcolor="rgba(255,255,255,0.75)",
                     bordercolor="rgba(0,0,0,0.12)", borderwidth=1)
 
-# 저온 완화 라벨의 겹침 회피 로직
+# 하단 한 줄 요약(임원용)
+band_vals = [("−5~0℃", avg_m5_0), ("0~5℃", avg_0_5), ("5~10℃", avg_5_10)]
+best_label, best_val = max(band_vals, key=lambda x: x[1])
+bottom_text = (f"요약: 현재 설정 기준 **1℃ 하락 시 증가량 최대 구간은 {best_label}** "
+               f"(평균 약 {fmt_int(best_val)} MJ/℃). "
+               f"값은 Poly-3 기반 민감도에 저온 완화(옵션)를 반영함.")
+figE.add_annotation(
+    x=(xmin_vis+xmax_vis)/2, y=-0.16, xref="x", yref="paper",
+    text=bottom_text, showarrow=False,
+    font=dict(size=12), bgcolor="rgba(255,255,255,0.85)",
+    bordercolor="rgba(0,0,0,0.12)", borderwidth=1
+)
+
+# 저온 완화 라벨(겹침 방지)
 if use_cold:
     figE.add_vline(x=T_cold, line_dash="dot", line_color="gray")
     y_tcold = 1.10
     xshift  = 0
-    # Heating Slowdown 라벨과 가까우면 위로
     if T_cold <= (xmin_vis + 0.35*(T_slow - xmin_vis)):
         y_tcold = 1.18
-    # 너무 왼쪽 끝이면 아래로 내리고 약간 오른쪽으로 민다
     if T_cold <= xmin_vis + 0.8:
         y_tcold = 1.06
         xshift  = 28
@@ -454,4 +482,4 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-st.caption("섹션 B는 Q=a+b·H+c·H²+d·H³(곡률강조 ×k)로 적합, 섹션 E는 주석 자동 위치조정으로 겹침을 방지합니다.")
+st.caption("섹션 B는 Q=a+b·H+c·H²+d·H³(곡률강조 ×k)로 적합, 섹션 C/D/E는 동일 정의(저온 완화 옵션·부드러운 ReLU)로 비교됩니다.")
