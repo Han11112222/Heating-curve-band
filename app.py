@@ -26,7 +26,8 @@ st.title("🔥 HeatBand Insight — 난방구간·민감도 분석")
 
 # ── Utils ───────────────────────────────────────────────────
 def to_num(x):
-    if isinstance(x, str): x = x.replace(",", "")
+    if isinstance(x, str):
+        x = x.replace(",", "")
     return pd.to_numeric(x, errors="coerce")
 
 def fit_poly3(x: np.ndarray, y: np.ndarray):
@@ -79,8 +80,10 @@ def nice_poly_string(a,b,c,d, digits=1):
     return s
 
 def fmt_int(x):
-    try: return f"{int(np.round(float(x))):,}"
-    except Exception: return str(x)
+    try:
+        return f"{int(np.round(float(x))):,}"
+    except Exception:
+        return str(x)
 
 # ── Excel Loader ─────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
@@ -193,9 +196,8 @@ curve_k   = st.sidebar.slider("수요곡선 곡률 강조(×)", 1.0, 4.0, 2.0, 0
 def sigmoid(x): return 1/(1+np.exp(-x))
 if use_cold:
     cf = sigmoid((tgrid - T_cold)/tau)
-    # 0℃ 이상은 완화 없음, 과도 감쇠 방지(하한=0.6)
-    cf = np.where(tgrid >= 0, 1.0, cf)
-    cf = np.clip(cf, 0.6, 1.0)
+    cf = np.where(tgrid >= 0, 1.0, cf)  # 0℃ 이상은 완화 없음
+    cf = np.clip(cf, 0.6, 1.0)          # 과도 감쇠 방지
     cold_factor = cf
 else:
     cold_factor = np.ones_like(tgrid)
@@ -373,7 +375,7 @@ def band_plot(ax, loT, hiT, label):
                       xaxis=dict(title="기온(℃)", range=[loT, hiT]),
                       yaxis=dict(title="Δ1℃ 증가량(MJ/℃)", tickformat=","),
                       title=f"Band {label} Response")
-    ax.plotly_chart(fig, use_container_width=True, config={"displaylogo": False])
+    ax.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
 with tab1: band_plot(st, -5, 0, "−5~0℃")
 with tab2: band_plot(st, 0, 5, "0~5℃")
