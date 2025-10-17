@@ -173,35 +173,33 @@ z90 = 1.645
 d_lo = deriv_mean - z90*deriv_se
 d_hi = deriv_mean + z90*deriv_se
 
-# ── 부드러운 ReLU(0 부근 꺾임 제거) ─────────────────────────
+# ── 부드러운 ReLU로 양수화(0 부근 꺾임 제거) ─────────────────
 def smooth_relu(x, eps):
-    # 0.5*(x + sqrt(x^2 + eps^2)) : x<0이면 ~0, x>0이면 x, 0 부근이 매끈
     return 0.5 * (x + np.sqrt(x*x + eps*eps))
+eps_rel = 0.015 * max(1.0, float(np.nanmax(np.abs(deriv_mean))))
 
-eps_rel = 0.015 * max(1.0, float(np.nanmax(np.abs(deriv_mean))))  # 데이터 스케일 기반
+base_inc = smooth_relu(-deriv_mean, eps_rel)   # Raw 증가량
+base_lo  = smooth_relu(-d_hi, eps_rel)
+base_hi  = smooth_relu(-d_lo, eps_rel)
 
-# 증가량(양수화) — hard ReLU 대신 soft ReLU 사용
-base_inc = smooth_relu(-deriv_mean, eps_rel)
-base_lo  = smooth_relu(-d_hi, eps_rel)  # 하한(증가량 관점)
-base_hi  = smooth_relu(-d_lo, eps_rel)  # 상한
-
-# ── 저온 완화(Attenuation) — 연속 블렌딩(불연속 제거) ────────
+# ── 저온 완화(시나리오 토글만, 기본 OFF) ─────────────────────
 st.sidebar.header("④ 시뮬레이션 옵션")
 auto_zoom = st.sidebar.toggle("밴드 자동 Y축 줌(곡률 강조)", value=True)
-use_cold  = st.sidebar.toggle("저온 완화 적용(아주 낮은 온도에서 증가량 둔화)", value=True)
-T_cold    = st.sidebar.slider("저온 완화 시작온도 T_cold(℃)", -10.0, 5.0, -2.0, 0.1)
-tau       = st.sidebar.slider("완화 전이폭 τ(℃, 클수록 완만)", 0.5, 5.0, 1.5, 0.1)
-curve_k   = st.sidebar.slider("수요곡선 곡률 강조(×)", 1.0, 4.0, 2.0, 0.1)
+use_cold  = st.sidebar.toggle("저온 완화 시나리오(극저온에서 증가량 둔화)", value=False)
+
+# 고정 파라미터(문서화 목적)
+T_COLD_FIXED = -2.0   # ℃
+TAU_FIXED    = 1.5    # ℃
+CURVE_K_FIXED= 2.0    # (힌지 곡선용 배율 — 본 계산엔 영향 없음)
 
 def sigmoid(x): return 1/(1+np.exp(-x))
 def smoothstep(x, w=1.2, c=0.0):
-    # 0 주변에서 0→1로 부드럽게 전이
     return 0.5 * (1 + np.tanh((x - c) / w))
 
 if use_cold:
-    cf_raw = sigmoid((tgrid - T_cold)/tau)           # 저온에서 0~1
-    blend  = smoothstep(tgrid, w=1.2, c=0.0)         # 0℃ 부근에서 0→1
-    cold_factor = cf_raw*(1.0 - blend) + 1.0*blend   # 연속/미분가능 블렌딩
+    cf_raw = sigmoid((tgrid - T_COLD_FIXED)/TAU_FIXED)              # −∞→0, +∞→1
+    blend  = smoothstep(tgrid, w=1.2, c=0.0)                        # 0℃ 부근 부드러운 전이
+    cold_factor = cf_raw*(1.0 - blend) + 1.0*blend                  # 연속 블렌딩
 else:
     cold_factor = np.ones_like(tgrid)
 
@@ -209,7 +207,7 @@ inc    = base_inc * cold_factor
 inc_lo = base_lo  * cold_factor
 inc_hi = base_hi  * cold_factor
 
-# ── 난방 시작/둔화/포화 ─────────────────────────────────────
+# ── 난방 시작/둔화/포화(참고) ────────────────────────────────
 def hinge_base_temp(T: np.ndarray, Q: np.ndarray,
                     grid_min: float=0.0, grid_max: float=20.0, step: float=0.1):
     thetas = np.arange(grid_min, grid_max + 1e-9, step)
@@ -228,20 +226,18 @@ def hinge_base_temp(T: np.ndarray, Q: np.ndarray,
     return best_th, best_a, best_b
 
 theta_star, a_hat, b_hat = hinge_base_temp(train["temp"].values, train["Q"].values, 0.0, 20.0, 0.1)
-T_slow   = float(tgrid[int(np.argmin(deriv_mean))])             # 최저 기울기 지점
+T_slow   = float(tgrid[int(np.argmin(deriv_mean))])
 max_neg  = float(np.max(inc))
 T_cap    = float(tgrid[np.argmax(inc <= 0.02*max_neg)]) if max_neg>0 else np.nan
 
-# ========== 곡선 힌지(큐빅) 적합 (섹션 B) ==========
+# ========== 힌지(큐빅) 곡선(시각화용) ==========
 def fit_hinge_cubic(T: np.ndarray, Q: np.ndarray, theta: float) -> Tuple[float,float,float,float]:
     H = np.clip(theta - T, 0, None)
     X = np.column_stack([np.ones_like(H), H, H**2, H**3])
     beta, *_ = np.linalg.lstsq(X, Q, rcond=None)
     a_c, b_c, c_c, d_c = map(float, beta)
     return a_c, b_c, c_c, d_c
-
 a_c, b_c, c_c, d_c = fit_hinge_cubic(train["temp"].values, train["Q"].values, theta_star)
-
 def qhat_cubic(t: np.ndarray, theta: float, a_c: float, b_c: float, c_c: float, d_c: float, k: float) -> np.ndarray:
     H = np.clip(theta - t, 0, None)
     return a_c + b_c*H + (k*c_c)*(H**2) + (k*d_c)*(H**3)
@@ -271,10 +267,10 @@ figA.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14)
                    title=f"R²={r2:.3f} · 식: {eq_str}")
 st.plotly_chart(figA, use_container_width=True, config={"displaylogo": False})
 
-# ── (B) 수요곡선 — 곡선 힌지 + 라벨 겹침 해결 ──────────────
+# ── (B) 수요곡선 — 힌지 시각화 ─────────────────────────────
 st.subheader("🧊 B. Heating Start / Slowdown — 수요곡선")
 tline = np.linspace(xmin_vis, xmax_vis, 600)
-qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, curve_k)
+qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, CURVE_K_FIXED)
 
 figB = go.Figure()
 figB.add_trace(go.Scatter(x=df["temp"], y=df["Q"], mode="markers", name="전체(참고)",
@@ -311,14 +307,14 @@ figB.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14)
                    legend=dict(orientation="h", yanchor="top", y=-0.18, x=0.01))
 st.plotly_chart(figB, use_container_width=True, config={"displaylogo": False})
 
-# ── (C) 기온별 공급량 변화량 요약 ───────────────────────────
+# ── (C) 기온별 공급량 변화량 요약(요청 순서) ───────────────
 st.subheader("🌡️ C. 기온별 공급량 변화량 요약")
 
 def band_mean(temp_array, apply_cold=True):
     temps = np.array(temp_array, dtype=float)
     base = smooth_relu(-np.array([d1_at(m_all, t) for t in temps]), eps_rel)
     if apply_cold and use_cold:
-        cf_raw = 1/(1+np.exp(-(temps - T_cold)/tau))
+        cf_raw = 1/(1+np.exp(-(temps - T_COLD_FIXED)/TAU_FIXED))
         blend  = 0.5*(1 + np.tanh((temps - 0.0)/1.2))
         cf = cf_raw*(1.0 - blend) + 1.0*blend
         base = base * cf
@@ -332,7 +328,6 @@ avg_m5_0  = band_mean(band["−5~0℃"], apply_cold=True)
 avg_0_5   = band_mean(band["0~5℃"],  apply_cold=True)
 avg_5_10  = band_mean(band["5~10℃"], apply_cold=True)
 
-# ★요청 순서: −5~0 → 0~5 → 5~10
 st.markdown(
 f"""
 **Polynomial Regression (degree 3)**  
@@ -384,7 +379,7 @@ with tab1: band_plot(st, -5, 0, "−5~0℃")
 with tab2: band_plot(st, 0, 5, "0~5℃")
 with tab3: band_plot(st, 5, 10, "5~10℃")
 
-# ── (E) 전체 곡선(저온 완화 포함) ───────────────────────────
+# ── (E) 전체 곡선 ───────────────────────────────────────────
 st.subheader("🧭 E. Refined Gas Supply Rate of Change (Dynamic)")
 figE = go.Figure()
 figE.add_trace(go.Scatter(
@@ -393,18 +388,13 @@ figE.add_trace(go.Scatter(
     hovertemplate="T=%{x:.2f}℃<br>증가량=%{y:,.0f} MJ/℃<extra></extra>"
 ))
 
-# 영역 음영
 figE.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.12, line_width=0, layer="below")
 figE.add_vrect(x0=T_slow, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.12, line_width=0, layer="below")
 
-# 상단 영역 라벨
 def top_note(x, text, y=1.12):
-    figE.add_annotation(
-        x=x, y=y, xref="x", yref="paper", showarrow=False, text=text,
-        font=dict(size=12),
-        bgcolor="rgba(255,255,255,0.75)", bordercolor="rgba(0,0,0,0.12)", borderwidth=1
-    )
-
+    figE.add_annotation(x=x, y=y, xref="x", yref="paper", showarrow=False, text=text,
+                        font=dict(size=12), bgcolor="rgba(255,255,255,0.75)",
+                        bordercolor="rgba(0,0,0,0.12)", borderwidth=1)
 top_note((xmin_vis+T_slow)/2,  f"Heating Slowdown (≤ {T_slow:.2f}℃)")
 top_note((T_slow+theta_star)/2, f"Heating Start ({T_slow:.2f}~{theta_star:.2f}℃)")
 figE.add_vline(x=theta_star, line_dash="dash", line_color="black")
@@ -413,39 +403,30 @@ figE.add_annotation(x=theta_star, y=1.14, xref="x", yref="paper",
                     font=dict(size=12), bgcolor="rgba(255,255,255,0.75)",
                     bordercolor="rgba(0,0,0,0.12)", borderwidth=1)
 
-# 하단 한 줄 요약(임원용) — 폰트 크게(14), 줄바꿈
+# 하단 요약(크게)
 band_vals = [("−5~0℃", avg_m5_0), ("0~5℃", avg_0_5), ("5~10℃", avg_5_10)]
 best_label, best_val = max(band_vals, key=lambda x: x[1])
 bottom_text = (f"<b>요약</b>: 현재 설정 기준 1℃ 하락 시 증가량 <b>최대</b> 구간은 "
-               f"<b>{best_label}</b> (평균 <b>{fmt_int(best_val)} MJ/℃</b>)<br>"
-               f"※ Poly-3 기반 민감도에 저온 완화(옵션)와 부드러운 ReLU를 반영함.")
+               f"<b>{best_label}</b> (평균 <b>{fmt_int(best_val)} MJ/℃</b>) — "
+               f"값은 Poly-3 기반 <b>직접 민감도(Raw)</b>{' + 저온완화 시나리오' if use_cold else ''}입니다.")
 figE.add_annotation(
     x=(xmin_vis+xmax_vis)/2, y=-0.19, xref="x", yref="paper",
     text=bottom_text, showarrow=False,
-    font=dict(size=14), bgcolor="rgba(255,255,255,0.92)",
+    font=dict(size=15), bgcolor="rgba(255,255,255,0.96)",
     bordercolor="rgba(0,0,0,0.12)", borderwidth=1
 )
 
-# 저온 완화 라벨(겹침 방지)
 if use_cold:
-    figE.add_vline(x=T_cold, line_dash="dot", line_color="gray")
-    y_tcold = 1.10
-    xshift  = 0
-    if T_cold <= (xmin_vis + 0.35*(T_slow - xmin_vis)):
-        y_tcold = 1.18
-    if T_cold <= xmin_vis + 0.8:
-        y_tcold = 1.06
-        xshift  = 28
-    figE.add_annotation(
-        x=T_cold, y=y_tcold, xref="x", yref="paper", xshift=xshift,
-        text=f"저온 완화시작 T_cold={T_cold:.1f}℃", showarrow=False,
-        font=dict(size=12), bgcolor="rgba(255,255,255,0.85)",
-        bordercolor="rgba(0,0,0,0.12)", borderwidth=1
-    )
+    figE.add_vline(x=T_COLD_FIXED, line_dash="dot", line_color="gray")
+    figE.add_annotation(x=T_COLD_FIXED, y=1.10, xref="x", yref="paper",
+                        text=f"저온완화 T_cold={T_COLD_FIXED:.1f}℃, τ={TAU_FIXED:.2f}℃",
+                        showarrow=False, font=dict(size=12),
+                        bgcolor="rgba(255,255,255,0.85)",
+                        bordercolor="rgba(0,0,0,0.12)", borderwidth=1)
 
 figE.update_layout(
     template="simple_white", font=dict(family=PLOT_FONT, size=14),
-    margin=dict(l=40,r=20,t=40,b=70),  # 하단 여백 +20
+    margin=dict(l=40,r=20,t=40,b=80),
     xaxis=dict(title="Temperature (℃)", range=[xmin_vis, xmax_vis]),
     yaxis=dict(title="Rate of Change (MJ/℃, +가 증가)", tickformat=","),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0)
@@ -465,8 +446,8 @@ def build_xlsx_bytes():
     with pd.ExcelWriter(buf, engine=engine) as wr:
         summary = pd.DataFrame({
             "항목":["식(Poly-3)","R²","Start θ*","Slowdown","Saturation(추정)",
-                   "곡선힌지 곡률강조 배율(k)"],
-            "값":[eq_str, r2, theta_star, T_slow, T_cap, curve_k]
+                   "T_cold(℃)","τ(℃)","시나리오 사용여부"],
+            "값":[eq_str, r2, theta_star, T_slow, T_cap, T_COLD_FIXED, TAU_FIXED, use_cold]
         })
         summary.to_excel(wr, index=False, sheet_name="Summary")
         pd.DataFrame({"a0":[a], "b1":[b], "c2":[c], "d3":[d]}).to_excel(wr, index=False, sheet_name="Coefficients")
@@ -487,4 +468,4 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-st.caption("섹션 B는 Q=a+b·H+c·H²+d·H³(곡률강조 ×k)로 적합, 섹션 C/D/E는 동일 정의(저온 완화 연속 블렌딩·부드러운 ReLU)로 비교됩니다.")
+st.caption("본 화면의 기본 수치는 Raw(Poly-3 직접 민감도)이며, ‘저온 완화’는 별도 시나리오로만 적용됩니다.")
