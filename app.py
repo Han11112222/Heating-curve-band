@@ -185,7 +185,7 @@ base_inc = smooth_relu(-deriv_mean, eps_rel)
 base_lo  = smooth_relu(-d_hi, eps_rel)  # 하한(증가량 관점)
 base_hi  = smooth_relu(-d_lo, eps_rel)  # 상한
 
-# ── 저온 완화(Attenuation) 옵션 ─────────────────────────────
+# ── 저온 완화(Attenuation) — 연속 블렌딩(불연속 제거) ────────
 st.sidebar.header("④ 시뮬레이션 옵션")
 auto_zoom = st.sidebar.toggle("밴드 자동 Y축 줌(곡률 강조)", value=True)
 use_cold  = st.sidebar.toggle("저온 완화 적용(아주 낮은 온도에서 증가량 둔화)", value=True)
@@ -194,11 +194,14 @@ tau       = st.sidebar.slider("완화 전이폭 τ(℃, 클수록 완만)", 0.5,
 curve_k   = st.sidebar.slider("수요곡선 곡률 강조(×)", 1.0, 4.0, 2.0, 0.1)
 
 def sigmoid(x): return 1/(1+np.exp(-x))
+def smoothstep(x, w=1.2, c=0.0):
+    # 0 주변에서 0→1로 부드럽게 전이
+    return 0.5 * (1 + np.tanh((x - c) / w))
+
 if use_cold:
-    cf = sigmoid((tgrid - T_cold)/tau)
-    cf = np.where(tgrid >= 0, 1.0, cf)  # 0℃ 이상은 완화 없음
-    cf = np.clip(cf, 0.6, 1.0)          # 과도 감쇠 방지
-    cold_factor = cf
+    cf_raw = sigmoid((tgrid - T_cold)/tau)           # 저온에서 0~1
+    blend  = smoothstep(tgrid, w=1.2, c=0.0)         # 0℃ 부근에서 0→1
+    cold_factor = cf_raw*(1.0 - blend) + 1.0*blend   # 연속/미분가능 블렌딩
 else:
     cold_factor = np.ones_like(tgrid)
 
@@ -313,11 +316,11 @@ st.subheader("🌡️ C. 기온별 공급량 변화량 요약")
 
 def band_mean(temp_array, apply_cold=True):
     temps = np.array(temp_array, dtype=float)
-    base = smooth_relu(-np.array([d1_at(m_all, t) for t in temps]), eps_rel)  # Soft ReLU
+    base = smooth_relu(-np.array([d1_at(m_all, t) for t in temps]), eps_rel)
     if apply_cold and use_cold:
-        cf = 1.0 / (1.0 + np.exp(-(temps - T_cold) / tau))
-        cf = np.where(temps >= 0, 1.0, cf)  # 0℃ 이상 완화 X
-        cf = np.clip(cf, 0.6, 1.0)          # 하한
+        cf_raw = 1/(1+np.exp(-(temps - T_cold)/tau))
+        blend  = 0.5*(1 + np.tanh((temps - 0.0)/1.2))
+        cf = cf_raw*(1.0 - blend) + 1.0*blend
         base = base * cf
     return float(np.mean(base))
 
@@ -410,16 +413,16 @@ figE.add_annotation(x=theta_star, y=1.14, xref="x", yref="paper",
                     font=dict(size=12), bgcolor="rgba(255,255,255,0.75)",
                     bordercolor="rgba(0,0,0,0.12)", borderwidth=1)
 
-# 하단 한 줄 요약(임원용)
+# 하단 한 줄 요약(임원용) — 폰트 크게(14), 줄바꿈
 band_vals = [("−5~0℃", avg_m5_0), ("0~5℃", avg_0_5), ("5~10℃", avg_5_10)]
 best_label, best_val = max(band_vals, key=lambda x: x[1])
-bottom_text = (f"요약: 현재 설정 기준 **1℃ 하락 시 증가량 최대 구간은 {best_label}** "
-               f"(평균 약 {fmt_int(best_val)} MJ/℃). "
-               f"값은 Poly-3 기반 민감도에 저온 완화(옵션)를 반영함.")
+bottom_text = (f"<b>요약</b>: 현재 설정 기준 1℃ 하락 시 증가량 <b>최대</b> 구간은 "
+               f"<b>{best_label}</b> (평균 <b>{fmt_int(best_val)} MJ/℃</b>)<br>"
+               f"※ Poly-3 기반 민감도에 저온 완화(옵션)와 부드러운 ReLU를 반영함.")
 figE.add_annotation(
-    x=(xmin_vis+xmax_vis)/2, y=-0.16, xref="x", yref="paper",
+    x=(xmin_vis+xmax_vis)/2, y=-0.19, xref="x", yref="paper",
     text=bottom_text, showarrow=False,
-    font=dict(size=12), bgcolor="rgba(255,255,255,0.85)",
+    font=dict(size=14), bgcolor="rgba(255,255,255,0.92)",
     bordercolor="rgba(0,0,0,0.12)", borderwidth=1
 )
 
@@ -442,7 +445,7 @@ if use_cold:
 
 figE.update_layout(
     template="simple_white", font=dict(family=PLOT_FONT, size=14),
-    margin=dict(l=40,r=20,t=40,b=40),
+    margin=dict(l=40,r=20,t=40,b=70),  # 하단 여백 +20
     xaxis=dict(title="Temperature (℃)", range=[xmin_vis, xmax_vis]),
     yaxis=dict(title="Rate of Change (MJ/℃, +가 증가)", tickformat=","),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0)
@@ -484,4 +487,4 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-st.caption("섹션 B는 Q=a+b·H+c·H²+d·H³(곡률강조 ×k)로 적합, 섹션 C/D/E는 동일 정의(저온 완화 옵션·부드러운 ReLU)로 비교됩니다.")
+st.caption("섹션 B는 Q=a+b·H+c·H²+d·H³(곡률강조 ×k)로 적합, 섹션 C/D/E는 동일 정의(저온 완화 연속 블렌딩·부드러운 ReLU)로 비교됩니다.")
