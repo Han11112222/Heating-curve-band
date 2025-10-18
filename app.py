@@ -53,7 +53,7 @@ def poly3_r2(y_true, y_pred):
     ss_tot = np.sum((y_true - np.mean(y_true))**2)
     return 1.0 - ss_res/ss_tot if ss_tot > 0 else np.nan
 
-def conf_band_y(x_train, y_train, tgrid, m, pf, z=1.645):  # ← 90% CI (z=1.645)
+def conf_band_y(x_train, y_train, tgrid, m, pf, z=1.645):  # 90% CI
     X = pf.transform(x_train.reshape(-1,1))
     yhat = m.predict(X)
     n, p = X.shape
@@ -149,7 +149,7 @@ if train.empty:
 # ── 시각 범위 ────────────────────────────────────────────────
 T = train["temp"].values
 p1, p99 = np.percentile(T, 1), np.percentile(T, 99)
-xmin_vis = float(np.floor(min(-5, p1 - 1.5))))
+xmin_vis = float(np.floor(min(-5, p1 - 1.5)))   # ← 괄호 수정 완료
 xmax_vis = float(np.ceil(max(25, p99 + 1.5)))
 
 # ── Poly-3 적합(전체) ────────────────────────────────────────
@@ -159,16 +159,15 @@ r2   = poly3_r2(train["Q"].values, yhat)
 a,b,c,d = poly3_coeffs(m_all)
 eq_str  = nice_poly_string(a,b,c,d, digits=1)
 
-# 촘촘한 그리드
+# 촘촘한 그리드 + 90% CI
 tgrid = np.linspace(xmin_vis, xmax_vis, 1201)
-# 90% CI 사용
 ci_lo_90, ci_hi_90, y_pred, sigma2, XtX_inv = conf_band_y(
     train["temp"].values, train["Q"].values, tgrid, m_all, pf_all, z=1.645
 )
 
 # ── 도함수(민감도) ───────────────────────────────────────────
 J = np.vstack([np.ones_like(tgrid)*0, np.ones_like(tgrid), 2*tgrid, 3*(tgrid**2)]).T
-deriv_mean = np.array([d1_at(m_all, t) for t in tgrid])       # dQ/dT (음수 가능)
+deriv_mean = np.array([d1_at(m_all, t) for t in tgrid])       # dQ/dT
 deriv_se   = np.sqrt(np.sum(J @ XtX_inv * J, axis=1) * sigma2)
 z90 = 1.645
 d_lo = deriv_mean - z90*deriv_se
