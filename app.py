@@ -53,7 +53,7 @@ def poly3_r2(y_true, y_pred):
     ss_tot = np.sum((y_true - np.mean(y_true))**2)
     return 1.0 - ss_res/ss_tot if ss_tot > 0 else np.nan
 
-def conf_band_y(x_train, y_train, tgrid, m, pf, z=1.96):
+def conf_band_y(x_train, y_train, tgrid, m, pf, z=1.645):  # ← 90% CI (z=1.645)
     X = pf.transform(x_train.reshape(-1,1))
     yhat = m.predict(X)
     n, p = X.shape
@@ -149,7 +149,7 @@ if train.empty:
 # ── 시각 범위 ────────────────────────────────────────────────
 T = train["temp"].values
 p1, p99 = np.percentile(T, 1), np.percentile(T, 99)
-xmin_vis = float(np.floor(min(-5, p1 - 1.5)))
+xmin_vis = float(np.floor(min(-5, p1 - 1.5))))
 xmax_vis = float(np.ceil(max(25, p99 + 1.5)))
 
 # ── Poly-3 적합(전체) ────────────────────────────────────────
@@ -161,8 +161,9 @@ eq_str  = nice_poly_string(a,b,c,d, digits=1)
 
 # 촘촘한 그리드
 tgrid = np.linspace(xmin_vis, xmax_vis, 1201)
-ci_lo_95, ci_hi_95, y_pred, sigma2, XtX_inv = conf_band_y(
-    train["temp"].values, train["Q"].values, tgrid, m_all, pf_all, z=1.96
+# 90% CI 사용
+ci_lo_90, ci_hi_90, y_pred, sigma2, XtX_inv = conf_band_y(
+    train["temp"].values, train["Q"].values, tgrid, m_all, pf_all, z=1.645
 )
 
 # ── 도함수(민감도) ───────────────────────────────────────────
@@ -173,7 +174,7 @@ z90 = 1.645
 d_lo = deriv_mean - z90*deriv_se
 d_hi = deriv_mean + z90*deriv_se
 
-# ── 부드러운 ReLU로 양수화(0 부근 꺾임 제거) ─────────────────
+# ── 부드러운 ReLU로 양수화(0 부근 꺾임 제거) ────────────────
 def smooth_relu(x, eps):
     return 0.5 * (x + np.sqrt(x*x + eps*eps))
 eps_rel = 0.015 * max(1.0, float(np.nanmax(np.abs(deriv_mean))))
@@ -197,9 +198,9 @@ def smoothstep(x, w=1.2, c=0.0):
     return 0.5 * (1 + np.tanh((x - c) / w))
 
 if use_cold:
-    cf_raw = sigmoid((tgrid - T_COLD_FIXED)/TAU_FIXED)              # −∞→0, +∞→1
-    blend  = smoothstep(tgrid, w=1.2, c=0.0)                        # 0℃ 부근 부드러운 전이
-    cold_factor = cf_raw*(1.0 - blend) + 1.0*blend                  # 연속 블렌딩
+    cf_raw = sigmoid((tgrid - T_COLD_FIXED)/TAU_FIXED)
+    blend  = smoothstep(tgrid, w=1.2, c=0.0)
+    cold_factor = cf_raw*(1.0 - blend) + 1.0*blend
 else:
     cold_factor = np.ones_like(tgrid)
 
@@ -243,7 +244,7 @@ def qhat_cubic(t: np.ndarray, theta: float, a_c: float, b_c: float, c_c: float, 
     return a_c + b_c*H + (k*c_c)*(H**2) + (k*d_c)*(H**3)
 
 # ── (A) 상관 그래프 ─────────────────────────────────────────
-st.subheader("🧮 A. 기온–공급량 상관 (Poly-3, 95% CI)")
+st.subheader("🧮 A. 기온–공급량 상관 (Poly-3, 90% CI)")
 figA = go.Figure()
 figA.add_trace(go.Scatter(
     x=train["temp"], y=train["Q"], mode="markers", name="샘플",
@@ -251,8 +252,8 @@ figA.add_trace(go.Scatter(
     hovertemplate="T=%{x:.2f}℃<br>Q=%{y:,.0f} MJ<extra></extra>"
 ))
 figA.add_trace(go.Scatter(
-    x=np.r_[tgrid, tgrid[::-1]], y=np.r_[ci_hi_95, ci_lo_95[::-1]],
-    fill="toself", name="95% CI",
+    x=np.r_[tgrid, tgrid[::-1]], y=np.r_[ci_hi_90, ci_lo_90[::-1]],
+    fill="toself", name="90% CI",
     line=dict(color="rgba(0,0,0,0)"),
     fillcolor="rgba(0,123,255,0.18)", hoverinfo="skip"
 ))
@@ -307,7 +308,7 @@ figB.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14)
                    legend=dict(orientation="h", yanchor="top", y=-0.18, x=0.01))
 st.plotly_chart(figB, use_container_width=True, config={"displaylogo": False})
 
-# ── (C) 기온별 공급량 변화량 요약(요청 순서) ───────────────
+# ── (C) 기온별 공급량 변화량 요약 ───────────────────────────
 st.subheader("🌡️ C. 기온별 공급량 변화량 요약")
 
 def band_mean(temp_array, apply_cold=True):
@@ -340,7 +341,7 @@ f"""
 )
 
 # ── (D) 구간별 동적 그래프 ───────────────────────────────────
-st.subheader("📈 D. 기온 구간별 동적 그래프 (−dQ/dT = 1℃ 하락 시 증가량, 5% CI ≈ 90%)")
+st.subheader("📈 D. 기온 구간별 동적 그래프 (−dQ/dT = 1℃ 하락 시 증가량, 90% CI)")
 tab1, tab2, tab3 = st.tabs(["−5~0℃", "0~5℃", "5~10℃"])
 
 def band_plot(ax, loT, hiT, label):
@@ -353,7 +354,7 @@ def band_plot(ax, loT, hiT, label):
     fig.add_trace(go.Scatter(
         x=np.r_[x, x[::-1]],
         y=np.r_[y_hi, y_lo[::-1]],
-        fill="toself", name="5% CI (±)", line=dict(color="rgba(0,0,0,0)"),
+        fill="toself", name="90% CI (±)", line=dict(color="rgba(0,0,0,0)"),
         fillcolor="rgba(0,123,255,0.15)", hoverinfo="skip"
     ))
     fig.add_trace(go.Scatter(
@@ -457,7 +458,7 @@ def build_xlsx_bytes():
         }).to_excel(wr, index=False, sheet_name="Band_Average")
         pd.DataFrame({"T(℃)":tgrid,
                       "Δ1℃ 증가량(MJ/℃)":inc,
-                      "CI_lo(5%)":inc_lo, "CI_hi(5%)":inc_hi}).to_excel(wr, index=False, sheet_name="Curve")
+                      "CI_lo(90%)":inc_lo, "CI_hi(90%)":inc_hi}).to_excel(wr, index=False, sheet_name="Curve")
     buf.seek(0)
     return buf.getvalue()
 
