@@ -190,32 +190,12 @@ use_cold  = st.sidebar.toggle("저온 완화 시나리오(극저온에서 증가
 # ── 열량 입력(환산) ──────────────────────────────────────────
 st.sidebar.header("⑤ 열량(환산 단위)")
 calorific = st.sidebar.number_input(
-    "열량 (MJ/nm³)", min_value=30.000, max_value=55.000, value=42.369, step=0.001, format="%.3f"
+    "열량 (MJ/Nm³)", min_value=30.000, max_value=55.000, value=42.369, step=0.001, format="%.3f"
 )
 def to_m3_per_deg(mj_per_deg: float, cv: float) -> float:
     if cv is None or cv <= 0:
         return np.nan
     return mj_per_deg / cv
-
-# 고정 파라미터(문서화 목적)
-T_COLD_FIXED = -2.0   # ℃
-TAU_FIXED    = 1.5    # ℃
-CURVE_K_FIXED= 2.0
-
-def sigmoid(x): return 1/(1+np.exp(-x))
-def smoothstep(x, w=1.2, c=0.0):
-    return 0.5 * (1 + np.tanh((x - c) / w))
-
-if use_cold:
-    cf_raw = sigmoid((tgrid - T_COLD_FIXED)/TAU_FIXED)
-    blend  = smoothstep(tgrid, w=1.2, c=0.0)
-    cold_factor = cf_raw*(1.0 - blend) + 1.0*blend
-else:
-    cold_factor = np.ones_like(tgrid)
-
-inc    = base_inc * cold_factor
-inc_lo = base_lo  * cold_factor
-inc_hi = base_hi  * cold_factor
 
 # ── 난방 시작/둔화/포화(참고) ────────────────────────────────
 def hinge_base_temp(T: np.ndarray, Q: np.ndarray,
@@ -280,7 +260,7 @@ st.plotly_chart(figA, use_container_width=True, config={"displaylogo": False})
 # ── (B) 수요곡선 — 힌지 시각화 ─────────────────────────────
 st.subheader("🧊 B. Heating Start / Slowdown — 수요곡선")
 tline = np.linspace(xmin_vis, xmax_vis, 600)
-qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, CURVE_K_FIXED)
+qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, 2.0)
 
 figB = go.Figure()
 figB.add_trace(go.Scatter(x=df["temp"], y=df["Q"], mode="markers", name="전체(참고)",
@@ -324,7 +304,7 @@ def band_mean(temp_array, apply_cold=True):
     temps = np.array(temp_array, dtype=float)
     base = smooth_relu(-np.array([d1_at(m_all, t) for t in temps]), eps_rel)
     if apply_cold and use_cold:
-        cf_raw = 1/(1+np.exp(-(temps - T_COLD_FIXED)/TAU_FIXED))
+        cf_raw = 1/(1+np.exp(-(temps - -2.0)/1.5))
         blend  = 0.5*(1 + np.tanh((temps - 0.0)/1.2))
         cf = cf_raw*(1.0 - blend) + 1.0*blend
         base = base * cf
@@ -338,19 +318,19 @@ avg_m5_0  = band_mean(band["−5~0℃"], apply_cold=True)
 avg_0_5   = band_mean(band["0~5℃"],  apply_cold=True)
 avg_5_10  = band_mean(band["5~10℃"], apply_cold=True)
 
-# m³/℃ 환산값
-avg_m5_0_m3 = to_m3_per_deg(avg_m5_0, calorific)
-avg_0_5_m3  = to_m3_per_deg(avg_0_5,  calorific)
-avg_5_10_m3 = to_m3_per_deg(avg_5_10, calorific)
+# Nm³/℃ 환산
+avg_m5_0_nm3 = to_m3_per_deg(avg_m5_0, calorific)
+avg_0_5_nm3  = to_m3_per_deg(avg_0_5,  calorific)
+avg_5_10_nm3 = to_m3_per_deg(avg_5_10, calorific)
 
 st.markdown(
 f"""
 **Polynomial Regression (degree 3)**  
 **{eq_str}**  
 
-- **Supply ↑ per −1°C from 0→−5℃**: **{fmt_int(avg_m5_0)} MJ/℃** (**{fmt_int(avg_m5_0_m3)} m³/℃ @ {calorific:.3f} MJ/nm³**)  
-- **Supply ↑ per −1°C from 5→0℃** : **{fmt_int(avg_0_5)} MJ/℃** (**{fmt_int(avg_0_5_m3)} m³/℃ @ {calorific:.3f} MJ/nm³**)  
-- **Supply ↑ per −1°C from 10→5℃**: **{fmt_int(avg_5_10)} MJ/℃** (**{fmt_int(avg_5_10_m3)} m³/℃ @ {calorific:.3f} MJ/nm³**)
+- **Supply ↑ per −1°C from 0→−5℃**: **{fmt_int(avg_m5_0)} MJ/℃, {fmt_int(avg_m5_0_nm3)} Nm³/℃ (단위열량 {calorific:.3f} MJ/Nm³ 적용)**  
+- **Supply ↑ per −1°C from 5→0℃** : **{fmt_int(avg_0_5)} MJ/℃, {fmt_int(avg_0_5_nm3)} Nm³/℃ (단위열량 {calorific:.3f} MJ/Nm³ 적용)**  
+- **Supply ↑ per −1°C from 10→5℃**: **{fmt_int(avg_5_10)} MJ/℃, {fmt_int(avg_5_10_nm3)} Nm³/℃ (단위열량 {calorific:.3f} MJ/Nm³ 적용)**
 """
 )
 
@@ -361,9 +341,9 @@ tab1, tab2, tab3 = st.tabs(["−5~0℃", "0~5℃", "5~10℃"])
 def band_plot(ax, loT, hiT, label):
     mask = (tgrid>=loT) & (tgrid<=hiT)
     x = tgrid[mask]
-    y_mid = inc[mask]
-    y_lo  = inc_lo[mask]
-    y_hi  = inc_hi[mask]
+    y_mid = base_inc[mask] if not use_cold else (base_inc*cold_factor)[mask]
+    y_lo  = base_lo[mask]  if not use_cold else (base_lo*cold_factor)[mask]
+    y_hi  = base_hi[mask]  if not use_cold else (base_hi*cold_factor)[mask]
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=np.r_[x, x[::-1]],
@@ -398,11 +378,10 @@ with tab3: band_plot(st, 5, 10, "5~10℃")
 st.subheader("🧭 E. Refined Gas Supply Rate of Change (Dynamic)")
 figE = go.Figure()
 figE.add_trace(go.Scatter(
-    x=tgrid, y=inc, mode="lines", name="증가량(MJ/℃)",
+    x=tgrid, y=base_inc if not use_cold else base_inc*cold_factor, mode="lines", name="증가량(MJ/℃)",
     line=dict(width=3, shape="spline", smoothing=1.2),
     hovertemplate="T=%{x:.2f}℃<br>증가량=%{y:,.0f} MJ/℃<extra></extra>"
 ))
-
 figE.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.12, line_width=0, layer="below")
 figE.add_vrect(x0=T_slow, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.12, line_width=0, layer="below")
 
@@ -417,27 +396,6 @@ figE.add_annotation(x=theta_star, y=1.14, xref="x", yref="paper",
                     text=f"Start θ* {theta_star:.2f}℃", showarrow=False,
                     font=dict(size=12), bgcolor="rgba(255,255,255,0.75)",
                     bordercolor="rgba(0,0,0,0.12)", borderwidth=1)
-
-# 하단 요약(크게)
-band_vals = [("−5~0℃", avg_m5_0), ("0~5℃", avg_0_5), ("5~10℃", avg_5_10)]
-best_label, best_val = max(band_vals, key=lambda x: x[1])
-bottom_text = (f"<b>요약</b>: 현재 설정 기준 1℃ 하락 시 증가량 <b>최대</b> 구간은 "
-               f"<b>{best_label}</b> (평균 <b>{fmt_int(best_val)} MJ/℃</b>) — "
-               f"값은 Poly-3 기반 <b>직접 민감도(Raw)</b>{' + 저온완화 시나리오' if use_cold else ''}입니다.")
-figE.add_annotation(
-    x=(xmin_vis+xmax_vis)/2, y=-0.19, xref="x", yref="paper",
-    text=bottom_text, showarrow=False,
-    font=dict(size=15), bgcolor="rgba(255,255,255,0.96)",
-    bordercolor="rgba(0,0,0,0.12)", borderwidth=1
-)
-
-if use_cold:
-    figE.add_vline(x=T_COLD_FIXED, line_dash="dot", line_color="gray")
-    figE.add_annotation(x=T_COLD_FIXED, y=1.10, xref="x", yref="paper",
-                        text=f"저온완화 T_cold={T_COLD_FIXED:.1f}℃, τ={TAU_FIXED:.2f}℃",
-                        showarrow=False, font=dict(size=12),
-                        bgcolor="rgba(255,255,255,0.85)",
-                        bordercolor="rgba(0,0,0,0.12)", borderwidth=1)
 
 figE.update_layout(
     template="simple_white", font=dict(family=PLOT_FONT, size=14),
@@ -461,20 +419,21 @@ def build_xlsx_bytes():
     with pd.ExcelWriter(buf, engine=engine) as wr:
         summary = pd.DataFrame({
             "항목":["식(Poly-3)","R²","Start θ*","Slowdown","Saturation(추정)",
-                   "T_cold(℃)","τ(℃)","시나리오 사용여부","열량(MJ/nm³)"],
-            "값":[eq_str, r2, theta_star, T_slow, T_cap, T_COLD_FIXED, TAU_FIXED, use_cold, calorific]
+                   "T_cold(℃)","τ(℃)","시나리오 사용여부","열량(MJ/Nm³)"],
+            "값":[eq_str, r2, theta_star, T_slow, T_cap, -2.0, 1.5, use_cold, calorific]
         })
         summary.to_excel(wr, index=False, sheet_name="Summary")
         pd.DataFrame({"a0":[a], "b1":[b], "c2":[c], "d3":[d]}).to_excel(wr, index=False, sheet_name="Coefficients")
         pd.DataFrame({
             "Band":["−5~0℃","0~5℃","5~10℃"],
             "Δ1℃ 증가량(MJ/℃)":[avg_m5_0, avg_0_5, avg_5_10],
-            "Δ1℃ 증가량(m³/℃)":[avg_m5_0_m3, avg_0_5_m3, avg_5_10_m3],
-            "열량(MJ/nm³)":[calorific, calorific, calorific]
+            "Δ1℃ 증가량(Nm³/℃)":[avg_m5_0_nm3, avg_0_5_nm3, avg_5_10_nm3],
+            "열량(MJ/Nm³)":[calorific, calorific, calorific]
         }).to_excel(wr, index=False, sheet_name="Band_Average")
         pd.DataFrame({"T(℃)":tgrid,
-                      "Δ1℃ 증가량(MJ/℃)":inc,
-                      "CI_lo(90%)":inc_lo, "CI_hi(90%)":inc_hi}).to_excel(wr, index=False, sheet_name="Curve")
+                      "Δ1℃ 증가량(MJ/℃)":base_inc if not use_cold else base_inc*cold_factor,
+                      "CI_lo(90%)":base_lo if not use_cold else base_lo*cold_factor,
+                      "CI_hi(90%)":base_hi if not use_cold else base_hi*cold_factor}).to_excel(wr, index=False, sheet_name="Curve")
     buf.seek(0)
     return buf.getvalue()
 
