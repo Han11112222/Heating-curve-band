@@ -187,6 +187,25 @@ st.sidebar.header("④ 시뮬레이션 옵션")
 auto_zoom = st.sidebar.toggle("밴드 자동 Y축 줌(곡률 강조)", value=True)
 use_cold  = st.sidebar.toggle("저온 완화 시나리오(극저온에서 증가량 둔화)", value=False)
 
+# 고정 파라미터(문서화 목적)
+T_COLD_FIXED = -2.0   # ℃
+TAU_FIXED    = 1.5    # ℃
+
+def sigmoid(x): return 1/(1+np.exp(-x))
+def smoothstep(x, w=1.2, c=0.0): return 0.5 * (1 + np.tanh((x - c) / w))
+
+if use_cold:
+    cf_raw = sigmoid((tgrid - T_COLD_FIXED)/TAU_FIXED)
+    blend  = smoothstep(tgrid, w=1.2, c=0.0)
+    cold_factor = cf_raw*(1.0 - blend) + 1.0*blend
+else:
+    cold_factor = np.ones_like(tgrid)
+
+# ▶▶ 여기서 'inc/lo/hi'를 명시적으로 정의 (이 줄들이 없어서 NameError 발생했었음)
+inc    = base_inc * cold_factor
+inc_lo = base_lo  * cold_factor
+inc_hi = base_hi  * cold_factor
+
 # ── 열량 입력(환산) ──────────────────────────────────────────
 st.sidebar.header("⑤ 열량(환산 단위)")
 calorific = st.sidebar.number_input(
@@ -304,7 +323,7 @@ def band_mean(temp_array, apply_cold=True):
     temps = np.array(temp_array, dtype=float)
     base = smooth_relu(-np.array([d1_at(m_all, t) for t in temps]), eps_rel)
     if apply_cold and use_cold:
-        cf_raw = 1/(1+np.exp(-(temps - -2.0)/1.5))
+        cf_raw = 1/(1+np.exp(-(temps - T_COLD_FIXED)/TAU_FIXED))
         blend  = 0.5*(1 + np.tanh((temps - 0.0)/1.2))
         cf = cf_raw*(1.0 - blend) + 1.0*blend
         base = base * cf
@@ -341,9 +360,9 @@ tab1, tab2, tab3 = st.tabs(["−5~0℃", "0~5℃", "5~10℃"])
 def band_plot(ax, loT, hiT, label):
     mask = (tgrid>=loT) & (tgrid<=hiT)
     x = tgrid[mask]
-    y_mid = base_inc[mask] if not use_cold else (base_inc*cold_factor)[mask]
-    y_lo  = base_lo[mask]  if not use_cold else (base_lo*cold_factor)[mask]
-    y_hi  = base_hi[mask]  if not use_cold else (base_hi*cold_factor)[mask]
+    y_mid = inc[mask]
+    y_lo  = inc_lo[mask]
+    y_hi  = inc_hi[mask]
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=np.r_[x, x[::-1]],
@@ -378,7 +397,7 @@ with tab3: band_plot(st, 5, 10, "5~10℃")
 st.subheader("🧭 E. Refined Gas Supply Rate of Change (Dynamic)")
 figE = go.Figure()
 figE.add_trace(go.Scatter(
-    x=tgrid, y=base_inc if not use_cold else base_inc*cold_factor, mode="lines", name="증가량(MJ/℃)",
+    x=tgrid, y=inc, mode="lines", name="증가량(MJ/℃)",
     line=dict(width=3, shape="spline", smoothing=1.2),
     hovertemplate="T=%{x:.2f}℃<br>증가량=%{y:,.0f} MJ/℃<extra></extra>"
 ))
@@ -420,20 +439,19 @@ def build_xlsx_bytes():
         summary = pd.DataFrame({
             "항목":["식(Poly-3)","R²","Start θ*","Slowdown","Saturation(추정)",
                    "T_cold(℃)","τ(℃)","시나리오 사용여부","열량(MJ/Nm³)"],
-            "값":[eq_str, r2, theta_star, T_slow, T_cap, -2.0, 1.5, use_cold, calorific]
+            "값":[eq_str, r2, theta_star, T_slow, T_cap, T_COLD_FIXED, TAU_FIXED, use_cold, calorific]
         })
         summary.to_excel(wr, index=False, sheet_name="Summary")
         pd.DataFrame({"a0":[a], "b1":[b], "c2":[c], "d3":[d]}).to_excel(wr, index=False, sheet_name="Coefficients")
         pd.DataFrame({
             "Band":["−5~0℃","0~5℃","5~10℃"],
-            "Δ1℃ 증가량(MJ/℃)":[avg_m5_0, avg_0_5, avg_5_10],
-            "Δ1℃ 증가량(Nm³/℃)":[avg_m5_0_nm3, avg_0_5_nm3, avg_5_10_nm3],
-            "열량(MJ/Nm³)":[calorific, calorific, calorific]
+            "Δ1℃ 증가량(MJ/℃)":[float(avg_m5_0), float(avg_0_5), float(avg_5_10)],
+            "Δ1℃ 증가량(Nm³/℃)":[float(avg_m5_0_nm3), float(avg_0_5_nm3), float(avg_5_10_nm3)],
+            "열량(MJ/Nm³)":[float(calorific), float(calorific), float(calorific)]
         }).to_excel(wr, index=False, sheet_name="Band_Average")
         pd.DataFrame({"T(℃)":tgrid,
-                      "Δ1℃ 증가량(MJ/℃)":base_inc if not use_cold else base_inc*cold_factor,
-                      "CI_lo(90%)":base_lo if not use_cold else base_lo*cold_factor,
-                      "CI_hi(90%)":base_hi if not use_cold else base_hi*cold_factor}).to_excel(wr, index=False, sheet_name="Curve")
+                      "Δ1℃ 증가량(MJ/℃)":inc,
+                      "CI_lo(90%)":inc_lo, "CI_hi(90%)":inc_hi}).to_excel(wr, index=False, sheet_name="Curve")
     buf.seek(0)
     return buf.getvalue()
 
