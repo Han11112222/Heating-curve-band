@@ -149,7 +149,7 @@ if train.empty:
 # ── 시각 범위 ────────────────────────────────────────────────
 T = train["temp"].values
 p1, p99 = np.percentile(T, 1), np.percentile(T, 99)
-xmin_vis = float(np.floor(min(-5, p1 - 1.5)))   # ← 괄호 수정 완료
+xmin_vis = float(np.floor(min(-5, p1 - 1.5)))
 xmax_vis = float(np.ceil(max(25, p99 + 1.5)))
 
 # ── Poly-3 적합(전체) ────────────────────────────────────────
@@ -187,10 +187,20 @@ st.sidebar.header("④ 시뮬레이션 옵션")
 auto_zoom = st.sidebar.toggle("밴드 자동 Y축 줌(곡률 강조)", value=True)
 use_cold  = st.sidebar.toggle("저온 완화 시나리오(극저온에서 증가량 둔화)", value=False)
 
+# ── 열량 입력(환산) ──────────────────────────────────────────
+st.sidebar.header("⑤ 열량(환산 단위)")
+calorific = st.sidebar.number_input(
+    "열량 (MJ/nm³)", min_value=30.000, max_value=55.000, value=42.369, step=0.001, format="%.3f"
+)
+def to_m3_per_deg(mj_per_deg: float, cv: float) -> float:
+    if cv is None or cv <= 0:
+        return np.nan
+    return mj_per_deg / cv
+
 # 고정 파라미터(문서화 목적)
 T_COLD_FIXED = -2.0   # ℃
 TAU_FIXED    = 1.5    # ℃
-CURVE_K_FIXED= 2.0    # (힌지 곡선용 배율 — 본 계산엔 영향 없음)
+CURVE_K_FIXED= 2.0
 
 def sigmoid(x): return 1/(1+np.exp(-x))
 def smoothstep(x, w=1.2, c=0.0):
@@ -328,14 +338,19 @@ avg_m5_0  = band_mean(band["−5~0℃"], apply_cold=True)
 avg_0_5   = band_mean(band["0~5℃"],  apply_cold=True)
 avg_5_10  = band_mean(band["5~10℃"], apply_cold=True)
 
+# m³/℃ 환산값
+avg_m5_0_m3 = to_m3_per_deg(avg_m5_0, calorific)
+avg_0_5_m3  = to_m3_per_deg(avg_0_5,  calorific)
+avg_5_10_m3 = to_m3_per_deg(avg_5_10, calorific)
+
 st.markdown(
 f"""
 **Polynomial Regression (degree 3)**  
 **{eq_str}**  
 
-- **Supply ↑ per −1°C from 0→−5℃**: **{fmt_int(avg_m5_0)} MJ/℃**  
-- **Supply ↑ per −1°C from 5→0℃** : **{fmt_int(avg_0_5)} MJ/℃**  
-- **Supply ↑ per −1°C from 10→5℃**: **{fmt_int(avg_5_10)} MJ/℃**
+- **Supply ↑ per −1°C from 0→−5℃**: **{fmt_int(avg_m5_0)} MJ/℃** (**{fmt_int(avg_m5_0_m3)} m³/℃ @ {calorific:.3f} MJ/nm³**)  
+- **Supply ↑ per −1°C from 5→0℃** : **{fmt_int(avg_0_5)} MJ/℃** (**{fmt_int(avg_0_5_m3)} m³/℃ @ {calorific:.3f} MJ/nm³**)  
+- **Supply ↑ per −1°C from 10→5℃**: **{fmt_int(avg_5_10)} MJ/℃** (**{fmt_int(avg_5_10_m3)} m³/℃ @ {calorific:.3f} MJ/nm³**)
 """
 )
 
@@ -446,14 +461,16 @@ def build_xlsx_bytes():
     with pd.ExcelWriter(buf, engine=engine) as wr:
         summary = pd.DataFrame({
             "항목":["식(Poly-3)","R²","Start θ*","Slowdown","Saturation(추정)",
-                   "T_cold(℃)","τ(℃)","시나리오 사용여부"],
-            "값":[eq_str, r2, theta_star, T_slow, T_cap, T_COLD_FIXED, TAU_FIXED, use_cold]
+                   "T_cold(℃)","τ(℃)","시나리오 사용여부","열량(MJ/nm³)"],
+            "값":[eq_str, r2, theta_star, T_slow, T_cap, T_COLD_FIXED, TAU_FIXED, use_cold, calorific]
         })
         summary.to_excel(wr, index=False, sheet_name="Summary")
         pd.DataFrame({"a0":[a], "b1":[b], "c2":[c], "d3":[d]}).to_excel(wr, index=False, sheet_name="Coefficients")
         pd.DataFrame({
             "Band":["−5~0℃","0~5℃","5~10℃"],
-            "Δ1℃ 증가량(MJ/℃)":[avg_m5_0, avg_0_5, avg_5_10]
+            "Δ1℃ 증가량(MJ/℃)":[avg_m5_0, avg_0_5, avg_5_10],
+            "Δ1℃ 증가량(m³/℃)":[avg_m5_0_m3, avg_0_5_m3, avg_5_10_m3],
+            "열량(MJ/nm³)":[calorific, calorific, calorific]
         }).to_excel(wr, index=False, sheet_name="Band_Average")
         pd.DataFrame({"T(℃)":tgrid,
                       "Δ1℃ 증가량(MJ/℃)":inc,
