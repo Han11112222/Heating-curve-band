@@ -463,10 +463,11 @@ st.download_button(
 )
 
 st.caption("본 화면의 기본 수치는 Raw(Poly-3 직접 민감도)이며, ‘저온 완화’는 별도 시나리오로만 적용됩니다.")
+
 # ============================================================
 # G. 기온분석 — 선택 월 히트맵(일자×연도) + 하단 평균행(색+숫자)
 #   - 소스: '일일기온.xlsx' (컬럼 예시: 날짜, 평균기온(℃))
-#   - 가로폭은 컨테이너폭 유지, 세로 높이만 기존 계산의 2배
+#   - 세로 높이 = 가로 폭의 2/3 로 고정
 # ============================================================
 import os
 import numpy as np
@@ -488,17 +489,14 @@ def _read_excel(file_like):
 
 @st.cache_data(show_spinner=False)
 def load_daily_temp():
-    # 업로더가 있으면 우선
     up = st.session_state.get("g_daily_upload", None)
     if up is not None:
         return _read_excel(up)
-    # 리포지토리 기본 파일명
     for p in ["일일기온.xlsx", "일일기온"]:
         if os.path.exists(p):
             return _read_excel(p)
     return pd.DataFrame()
 
-# 업로더(선택)
 u = st.file_uploader("일일기온 파일 업로드(XLSX)", type=["xlsx"], key="g_daily_uploader")
 if u is not None:
     st.session_state["g_daily_upload"] = u
@@ -532,34 +530,27 @@ dt["day"]   = dt["date"].dt.day
 years_all = sorted(dt["year"].unique().tolist())
 y_min, y_max = int(min(years_all)), int(max(years_all))
 months_all = list(range(1,13))
-month_names = {
-    1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
-    7:"July",8:"August",9:"September",10:"October",11:"November",12:"December"
-}
+month_names = {1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
+               7:"July",8:"August",9:"September",10:"October",11:"November",12:"December"}
 
 # --------------------------
-# 공용 헬퍼: 현 선택으로 dsel 생성
+# 공용 헬퍼: 현재 선택으로 dsel 생성
 # --------------------------
 def get_current_selection(dt: pd.DataFrame):
     ys = sorted(dt["year"].unique().tolist())
     y_min_l, y_max_l = int(min(ys)), int(max(ys))
     sel_range = st.session_state.get("g_year_range", (y_min_l, y_max_l))
     sel_month = st.session_state.get("g_month", int(dt["month"].iloc[-1]))
-
     sel_years = [y for y in ys if sel_range[0] <= y <= sel_range[1]]
     dsel = dt[(dt["year"].isin(sel_years)) & (dt["month"] == sel_month)].copy()
-
     if dsel.empty:
         return dsel, sel_years, sel_month, 0
-
     if "day" not in dsel.columns:
         dsel["day"] = dsel["date"].dt.day
-
     try:
         last_day = int(np.nanmax(dsel["day"].to_numpy()))
     except Exception:
         last_day = int(dsel["day"].max()) if not dsel.empty else 0
-
     return dsel, sel_years, sel_month, last_day
 
 # --------------------------
@@ -577,7 +568,7 @@ with c2:
                  key="g_month")
 
 # --------------------------
-# 히트맵 생성(선택 월만, 평균행 포함)
+# 히트맵 생성(선택 월만, 하단 평균행 포함)
 # --------------------------
 dsel, sel_years, sel_month, last_day = get_current_selection(dt)
 if dsel.empty or last_day == 0:
@@ -587,7 +578,7 @@ if dsel.empty or last_day == 0:
 pivot = (dsel.pivot_table(index="day", columns="year", values="tmean", aggfunc="mean")
                .reindex(range(1, last_day+1)))
 
-# 하단 평균행을 같은 히트맵의 마지막 행으로 추가
+# 하단 '평균' 행(같은 히트맵 내부의 마지막 행)
 avg_row = pivot.mean(axis=0, skipna=True)
 pivot_with_avg = pd.concat([pivot, pd.DataFrame([avg_row], index=["평균"])])
 
@@ -607,13 +598,11 @@ if Z.shape[0] > 0:
     last_idx = Z.shape[0] - 1
     text[last_idx, :] = [f"{v:.1f}" if np.isfinite(v) else "" for v in Z[last_idx, :]]
 
-# 사이즈: 가로는 그대로(컨테이너폭), 세로만 기존 계산의 2배
-n_cols = max(1, len(X))
-n_rows = max(1, len(Y))
-base_cell_px = 34                       # 가로 셀 기준폭 유지
-approx_width_px = n_cols * base_cell_px
-height_base = int((approx_width_px / n_cols) * n_rows)
-height = max(420, height_base * 2)      # ★ 세로만 2배
+# ── 사이즈: 가로폭 기준으로 세로 높이를 가로의 2/3 로 고정
+# 컨테이너 가로폭을 직접 알 수 없으니, 열 수×기준폭으로 가로 픽셀 근사
+base_cell_px = 34                 # 가로 셀 기준폭(그대로 유지)
+approx_width_px = max(600, len(X) * base_cell_px)  # 최소 폭 가드
+height = max(360, int(approx_width_px * 2/3))      # ★ 세로 = 가로의 2/3
 
 heat = go.Figure(data=go.Heatmap(
     z=Z,
@@ -625,10 +614,9 @@ heat = go.Figure(data=go.Heatmap(
     hoverongaps=False,
     hovertemplate="연도=%{x}<br>일자=%{y}<br>평균기온=%{z:.1f}℃<extra></extra>",
     text=text,
-    texttemplate="%{text}",             # 평균 행만 숫자 출력
+    texttemplate="%{text}",         # 평균 행에만 숫자 출력
     textfont={"size": 12}
 ))
-
 heat.update_layout(
     template="simple_white",
     font=dict(family=PLOT_FONT, size=13),
@@ -638,6 +626,5 @@ heat.update_layout(
     title=f"{sel_month:02d}월 일일 평균기온 히트맵 (선택연도 {len(X)}개)",
     height=height
 )
-
 st.plotly_chart(heat, use_container_width=True, config={"displaylogo": False})
 
