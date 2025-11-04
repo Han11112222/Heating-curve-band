@@ -465,9 +465,12 @@ st.download_button(
 st.caption("본 화면의 기본 수치는 Raw(Poly-3 직접 민감도)이며, ‘저온 완화’는 별도 시나리오로만 적용됩니다.")
 
 # ============================================================
-# G. 기온분석 — 선택 월 히트맵(일자×연도) + 하단 평균행(색+숫자)
+# G. 기온분석 — 선택 월 히트맵(일자×연도) + 하단 평균행(색+숫자) + 한파 강조 마커
 #   - 소스: '일일기온.xlsx' (컬럼 예시: 날짜, 평균기온(℃))
-#   - 세로 높이 = 가로 폭의 2/3 로 고정
+#   - 세로 높이 = 가로 폭의 2/3 (과도하게 길어지지 않게)
+#   - 마커:
+#       룰 A: 최근 N년 대비 하위 q% (동일일자 ±window) → 검은 ●
+#       룰 B: 월초(1~K일) 임계 T℃ 이하 → 주황 ◆
 # ============================================================
 import os
 import numpy as np
@@ -530,8 +533,10 @@ dt["day"]   = dt["date"].dt.day
 years_all = sorted(dt["year"].unique().tolist())
 y_min, y_max = int(min(years_all)), int(max(years_all))
 months_all = list(range(1,13))
-month_names = {1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
-               7:"July",8:"August",9:"September",10:"October",11:"November",12:"December"}
+month_names = {
+    1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
+    7:"July",8:"August",9:"September",10:"October",11:"November",12:"December"
+}
 
 # --------------------------
 # 공용 헬퍼: 현재 선택으로 dsel 생성
@@ -568,6 +573,24 @@ with c2:
                  key="g_month")
 
 # --------------------------
+# 한파 강조 옵션(룰 A/B)
+# --------------------------
+with st.expander("한파 강조 옵션", expanded=False):
+    colx1, colx2, colx3 = st.columns([1.25,1.1,0.9])
+    with colx1:
+        enable_ruleA = st.checkbox("룰 A: 최근 N년 대비 하위 q% 강조", value=True)
+        N_years = st.slider("최근 N년(N)", 3, 10, 5, step=1)
+        q_tail  = st.slider("하위 백분위(q, %)", 1, 30, 10, step=1) / 100.0
+        win_day = st.slider("동일일자 ±window(일)", 0, 3, 1, step=1)
+    with colx2:
+        enable_ruleB = st.checkbox("룰 B: 월초 조기 한파 강조", value=True)
+        early_K  = st.slider("월초 구간 K(일)", 3, 15, 7, step=1)
+        thr_T    = st.number_input("조기 한파 임계 T(℃ 이하)", value=0.0, step=0.5, format="%.1f")
+    with colx3:
+        st.caption("마커 설명")
+        st.markdown("• 룰 A: **검은 ●**<br>• 룰 B: **주황 ◆**", unsafe_allow_html=True)
+
+# --------------------------
 # 히트맵 생성(선택 월만, 하단 평균행 포함)
 # --------------------------
 dsel, sel_years, sel_month, last_day = get_current_selection(dt)
@@ -598,12 +621,49 @@ if Z.shape[0] > 0:
     last_idx = Z.shape[0] - 1
     text[last_idx, :] = [f"{v:.1f}" if np.isfinite(v) else "" for v in Z[last_idx, :]]
 
-# ── 사이즈: 가로폭 기준으로 세로 높이를 가로의 2/3 로 고정
-# 컨테이너 가로폭을 직접 알 수 없으니, 열 수×기준폭으로 가로 픽셀 근사
-base_cell_px = 34                 # 가로 셀 기준폭(그대로 유지)
-approx_width_px = max(600, len(X) * base_cell_px)  # 최소 폭 가드
-height = max(360, int(approx_width_px * 2/3))      # ★ 세로 = 가로의 2/3
+# ── 마커 좌표 계산(룰 A/B)
+cold_x, cold_y = [], []      # 룰 A(검은 ●)
+early_x, early_y = [], []    # 룰 B(주황 ◆)
+day_to_label = {int(d): f"{sel_month:02d}-{int(d):02d}" for d in pivot.index}
 
+if enable_ruleA:
+    years_sorted = sorted(pivot.columns.tolist())
+    for y in years_sorted:
+        ref_years = [yy for yy in years_sorted if (y - N_years) <= yy <= (y - 1)]
+        if len(ref_years) == 0:
+            continue
+        for d in pivot.index:
+            v = pivot.at[d, y]
+            if pd.isna(v):
+                continue
+            dL, dR = max(pivot.index.min(), d - win_day), min(pivot.index.max(), d + win_day)
+            ref_vals = pivot.loc[dL:dR, ref_years].to_numpy().ravel()
+            ref_vals = ref_vals[~np.isnan(ref_vals)]
+            if ref_vals.size < 5:
+                continue
+            qv = np.quantile(ref_vals, q_tail)
+            if v <= qv:
+                cold_x.append(y)
+                cold_y.append(day_to_label[int(d)])
+
+if enable_ruleB:
+    for y in pivot.columns.tolist():
+        for d in pivot.index:
+            if d > early_K:
+                break
+            v = pivot.at[d, y]
+            if pd.isna(v):
+                continue
+            if v <= thr_T:
+                early_x.append(y)
+                early_y.append(day_to_label[int(d)])
+
+# ── 사이즈: 가로폭 기준으로 세로 높이를 가로의 2/3 로 고정
+base_cell_px = 34                                # 가로 셀 기준폭
+approx_width_px = max(600, len(X) * base_cell_px) # 최소폭 가드
+height = max(360, int(approx_width_px * 2/3))     # ★ 세로 = 가로의 2/3
+
+# ── 히트맵
 heat = go.Figure(data=go.Heatmap(
     z=Z,
     x=X,
@@ -617,14 +677,36 @@ heat = go.Figure(data=go.Heatmap(
     texttemplate="%{text}",         # 평균 행에만 숫자 출력
     textfont={"size": 12}
 ))
+
+# ── 마커 트레이스 추가
+if len(cold_x) > 0:
+    heat.add_trace(go.Scatter(
+        x=cold_x, y=cold_y, mode="markers",
+        name=f"최근{N_years}년 하위 {int(q_tail*100)}%",
+        marker=dict(symbol="circle", size=9, color="black",
+                    line=dict(width=1, color="white")),
+        hovertemplate="연도=%{x}<br>일자=%{y}<br><b>하위 백분위(한파)</b><extra></extra>"
+    ))
+
+if len(early_x) > 0:
+    heat.add_trace(go.Scatter(
+        x=early_x, y=early_y, mode="markers",
+        name=f"월초(1~{early_K}일) {thr_T:.1f}℃ 이하",
+        marker=dict(symbol="diamond", size=11, color="orange",
+                    line=dict(width=1, color="white")),
+        hovertemplate="연도=%{x}<br>일자=%{y}<br><b>월초 조기 한파</b><extra></extra>"
+    ))
+
+# ── 레이아웃
 heat.update_layout(
     template="simple_white",
     font=dict(family=PLOT_FONT, size=13),
     margin=dict(l=40, r=20, t=40, b=40),
     xaxis=dict(title="Year", tickmode="linear", dtick=1, showgrid=False),
     yaxis=dict(title="Day", autorange="reversed", showgrid=False, type="category"),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     title=f"{sel_month:02d}월 일일 평균기온 히트맵 (선택연도 {len(X)}개)",
     height=height
 )
-st.plotly_chart(heat, use_container_width=True, config={"displaylogo": False})
 
+st.plotly_chart(heat, use_container_width=True, config={"displaylogo": False})
