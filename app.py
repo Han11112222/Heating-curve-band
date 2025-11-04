@@ -201,7 +201,7 @@ if use_cold:
 else:
     cold_factor = np.ones_like(tgrid)
 
-# ▶▶ 여기서 'inc/lo/hi'를 명시적으로 정의 (이 줄들이 없어서 NameError 발생했었음)
+# ▶▶ 여기서 'inc/lo/hi'를 명시적으로 정의
 inc    = base_inc * cold_factor
 inc_lo = base_lo  * cold_factor
 inc_hi = base_hi  * cold_factor
@@ -272,7 +272,7 @@ figA.add_trace(go.Scatter(
 figA.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
                    margin=dict(l=40,r=20,t=40,b=40),
                    xaxis=dict(title="기온(℃)", range=[xmin_vis, xmax_vis]),
-                   yaxis=dict(title="공급량(MJ)", tickformat=","),
+                   yaxis=dict(title="공급량(MJ)", tickformat=","), 
                    title=f"R²={r2:.3f} · 식: {eq_str}")
 st.plotly_chart(figA, use_container_width=True, config={"displaylogo": False})
 
@@ -466,8 +466,7 @@ st.caption("본 화면의 기본 수치는 Raw(Poly-3 직접 민감도)이며, �
 
 # ============================================================
 # G. 기온분석 — 선택 월 히트맵(일자×연도) + 하단 평균행(색+숫자)
-#   - 소스: '일일기온.xlsx' (컬럼 예시: 날짜, 평균기온(℃))
-#   - 세로 높이 = 가로 폭의 2/3 로 고정
+#   - 세로 높이 = 가로 폭의 2/3 * 1.30  (현재보다 30% 늘림)
 # ============================================================
 import os
 import numpy as np
@@ -480,9 +479,6 @@ PLOT_FONT = "Noto Sans KR"
 st.set_page_config(page_title="G. 기온분석 — 히트맵", layout="wide")
 st.subheader("🧊 G. 기온분석 — 일일 평균기온 히트맵")
 
-# --------------------------
-# 데이터 로딩
-# --------------------------
 @st.cache_data(show_spinner=False)
 def _read_excel(file_like):
     return pd.read_excel(file_like)
@@ -506,9 +502,6 @@ if raw.empty:
     st.warning("‘일일기온.xlsx’를 업로드하거나 리포지토리에 넣어줘.")
     st.stop()
 
-# --------------------------
-# 컬럼 추정 및 전처리
-# --------------------------
 def _guess(df: pd.DataFrame, keys, default=None):
     for k in keys:
         for c in df.columns:
@@ -533,9 +526,6 @@ months_all = list(range(1,13))
 month_names = {1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
                7:"July",8:"August",9:"September",10:"October",11:"November",12:"December"}
 
-# --------------------------
-# 공용 헬퍼: 현재 선택으로 dsel 생성
-# --------------------------
 def get_current_selection(dt: pd.DataFrame):
     ys = sorted(dt["year"].unique().tolist())
     y_min_l, y_max_l = int(min(ys)), int(max(ys))
@@ -553,9 +543,6 @@ def get_current_selection(dt: pd.DataFrame):
         last_day = int(dsel["day"].max()) if not dsel.empty else 0
     return dsel, sel_years, sel_month, last_day
 
-# --------------------------
-# 컨트롤: 연도 바(슬라이더) + 월 선택
-# --------------------------
 c1, c2 = st.columns([2,1])
 with c1:
     st.slider("연도 범위", min_value=y_min, max_value=y_max,
@@ -567,9 +554,6 @@ with c2:
                  format_func=lambda m: f"{m:02d} ({month_names[m]})",
                  key="g_month")
 
-# --------------------------
-# 히트맵 생성(선택 월만, 하단 평균행 포함)
-# --------------------------
 dsel, sel_years, sel_month, last_day = get_current_selection(dt)
 if dsel.empty or last_day == 0:
     st.info("선택한 연·월에 데이터가 없습니다.")
@@ -578,31 +562,26 @@ if dsel.empty or last_day == 0:
 pivot = (dsel.pivot_table(index="day", columns="year", values="tmean", aggfunc="mean")
                .reindex(range(1, last_day+1)))
 
-# 하단 '평균' 행(같은 히트맵 내부의 마지막 행)
 avg_row = pivot.mean(axis=0, skipna=True)
 pivot_with_avg = pd.concat([pivot, pd.DataFrame([avg_row], index=["평균"])])
 
-# 라벨
 y_labels = [f"{sel_month:02d}-{int(d):02d}" for d in pivot.index]
 y_labels.append("평균")
 
-# 값/텍스트
 Z = pivot_with_avg.values.astype(float)
 X = pivot_with_avg.columns.tolist()
 Y = y_labels
 zmid = float(np.nanmean(pivot.values))
 
-# 평균 행만 숫자 표기
 text = np.full_like(Z, "", dtype=object)
 if Z.shape[0] > 0:
     last_idx = Z.shape[0] - 1
     text[last_idx, :] = [f"{v:.1f}" if np.isfinite(v) else "" for v in Z[last_idx, :]]
 
-# ── 사이즈: 가로폭 기준으로 세로 높이를 가로의 2/3 로 고정
-# 컨테이너 가로폭을 직접 알 수 없으니, 열 수×기준폭으로 가로 픽셀 근사
-base_cell_px = 34                 # 가로 셀 기준폭(그대로 유지)
-approx_width_px = max(600, len(X) * base_cell_px)  # 최소 폭 가드
-height = max(360, int(approx_width_px * 2/3))      # ★ 세로 = 가로의 2/3
+# ── 사이즈: 가로 기준 2/3에서 30% 추가 → 2/3 * 1.30
+base_cell_px = 34
+approx_width_px = max(600, len(X) * base_cell_px)
+height = max(360, int(approx_width_px * 2/3 * 1.30))  # ★ 여기만 변경
 
 heat = go.Figure(data=go.Heatmap(
     z=Z,
@@ -614,7 +593,7 @@ heat = go.Figure(data=go.Heatmap(
     hoverongaps=False,
     hovertemplate="연도=%{x}<br>일자=%{y}<br>평균기온=%{z:.1f}℃<extra></extra>",
     text=text,
-    texttemplate="%{text}",         # 평균 행에만 숫자 출력
+    texttemplate="%{text}",
     textfont={"size": 12}
 ))
 heat.update_layout(
@@ -627,4 +606,3 @@ heat.update_layout(
     height=height
 )
 st.plotly_chart(heat, use_container_width=True, config={"displaylogo": False})
-
