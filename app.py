@@ -465,142 +465,132 @@ st.download_button(
 st.caption("본 화면의 기본 수치는 Raw(Poly-3 직접 민감도)이며, ‘저온 완화’는 별도 시나리오로만 적용됩니다.")
 
 # ─────────────────────────────────────────────────────────────
-# G. 기온분석 — 일일 평균기온 히트맵 (연/월 선택 + 하단 평균행 + 연도선택 바형 UI)
+# G. 기온분석 — 선택 월만 일일 평균기온 히트맵 (연도 범위 슬라이더 + 하단 평균행)
+#   • 소스: 업로드한 '일일기온.xlsx' (컬럼: 날짜, 평균기온(℃))
+#   • 동작: 선택 월의 1~말일만 행으로, 열은 연도 / 마지막 행 '평균'
+#   • 색상 중심(zmid): 선택 월 전체의 평균값
 # ─────────────────────────────────────────────────────────────
 st.subheader("🧊 G. 기온분석 — 일일 평균기온 히트맵")
 
 @st.cache_data(show_spinner=False)
+def _load_daily_temp_from_filelike(filelike):
+    # read_excel_cached가 있으면 사용, 없으면 pandas로 대체
+    try:
+        return read_excel_cached(filelike)
+    except Exception:
+        return pd.read_excel(filelike)
+
+@st.cache_data(show_spinner=False)
 def _load_daily_temp():
-    cand = ["일일기온.xlsx", "일일기온"]
-    for p in cand:
+    # 1) 업로더 우선
+    up = st.session_state.get("g_daily_upload", None)
+    if up is not None:
+        return _load_daily_temp_from_filelike(up)
+    # 2) 리포지토리 기본 파일
+    for p in ["일일기온.xlsx", "일일기온"]:
         if os.path.exists(p):
-            df0 = read_excel_cached(p)  # 기존 캐시 로더 재사용
-            return df0
-    st.warning("리포지토리에 '일일기온.xlsx'를 넣어줘.")
+            return _load_daily_temp_from_filelike(p)
     return pd.DataFrame()
 
+# 업로더(선택): 업로드하면 즉시 세션에 저장해 사용
+u = st.file_uploader("일일기온 파일 업로드(XLSX)", type=["xlsx"], key="g_daily_uploader")
+if u is not None:
+    st.session_state["g_daily_upload"] = u
+
 daily_raw = _load_daily_temp()
-if not daily_raw.empty:
-    # 컬럼 추정
-    def _guess(keys, default=None):
-        for k in keys:
-            for c in daily_raw.columns:
-                if k in str(c):
-                    return c
-        return default
-    date_c  = _guess(["날짜","Date","date"], daily_raw.columns[0])
-    tmean_c = _guess(["평균기온","기온","Tmean","avg"], daily_raw.columns[1])
+if daily_raw.empty:
+    st.warning("‘일일기온.xlsx’를 업로드하거나 리포지토리에 넣어줘.")
+    st.stop()
 
-    dt = daily_raw.copy()
-    dt["date"]  = pd.to_datetime(dt[date_c], errors="coerce")
-    dt["tmean"] = pd.to_numeric(dt[tmean_c], errors="coerce")
-    dt = dt.dropna(subset=["date","tmean"]).sort_values("date").reset_index(drop=True)
-    dt["year"]  = dt["date"].dt.year
-    dt["month"] = dt["date"].dt.month
-    dt["day"]   = dt["date"].dt.day
+# ── 컬럼 추정
+def _guess(keys, default=None):
+    for k in keys:
+        for c in daily_raw.columns:
+            if k in str(c):
+                return c
+    return default
 
-    years_all  = sorted(dt["year"].unique().tolist())
-    y_min, y_max = min(years_all), max(years_all)
-    months_all = list(range(1,13))
-    month_names = {1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
+date_c  = _guess(["날짜","Date","date"], daily_raw.columns[0])
+tmean_c = _guess(["평균기온","기온","Tmean","avg"], daily_raw.columns[1])
+
+dt = daily_raw.copy()
+dt["date"]  = pd.to_datetime(dt[date_c], errors="coerce")
+dt["tmean"] = pd.to_numeric(dt[tmean_c], errors="coerce")
+dt = dt.dropna(subset=["date","tmean"]).sort_values("date").reset_index(drop=True)
+dt["year"]  = dt["date"].dt.year
+dt["month"] = dt["date"].dt.month
+dt["day"]   = dt["date"].dt.day
+
+years_all       = sorted(dt["year"].unique().tolist())
+y_min, y_max    = int(min(years_all)), int(max(years_all))
+months_all      = list(range(1,13))
+month_names     = {1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
                    7:"July",8:"August",9:"September",10:"October",11:"November",12:"December"}
 
-    c1, c2 = st.columns([2,1])
-
-    with c1:
-        # 연도 "바 형태" 선택: 범위 슬라이더 + 빠른선택 버튼
-        sel_range = st.slider("연도 범위", min_value=int(y_min), max_value=int(y_max),
-                              value=(int(y_min), int(y_max)), step=1, key="g_year_range")
-        btn1, btn2, btn3 = st.columns(3)
-        with btn1:
-            if st.button("전체", use_container_width=True):
-                sel_range = (int(y_min), int(y_max))
-                st.session_state["g_year_range"] = sel_range
-        with btn2:
-            if st.button("최근10년", use_container_width=True):
-                lo = max(y_min, y_max-9)
-                sel_range = (int(lo), int(y_max))
-                st.session_state["g_year_range"] = sel_range
-        with btn3:
-            if st.button("최근5년", use_container_width=True):
-                lo = max(y_min, y_max-4)
-                sel_range = (int(lo), int(y_max))
-                st.session_state["g_year_range"] = sel_range
-
-    with c2:
-        default_month = int(dt["month"].iloc[-1])
-        sel_month = st.selectbox(
-            "월 선택", options=months_all,
-            index=months_all.index(default_month),
-            format_func=lambda m: f"{m:02d} ({month_names[m]})", key="g_month"
-        )
-
-    # 선택 연도 집합(슬라이더 범위 내)
-    sel_years = [y for y in years_all if sel_range[0] <= y <= sel_range[1]]
-
-    # ------ 필터: "선택 월"만 남김 (예: 3월이면 3월1~31일만) ------
-    dsel = dt[(dt["year"].isin(sel_years)) & (dt["month"] == sel_month)].copy()
-    if dsel.empty:
-        st.info("선택한 연·월에 데이터가 없습니다.")
-        st.stop()
-
-    # 피벗: 행=일(1~말일), 열=연도
-    last_day = int(dsel["day"].max())
-    pivot = (dsel.pivot_table(index="day", columns="year", values="tmean", aggfunc="mean")
-                   .reindex(range(1, last_day+1)))
-
-    # 하단 평균행(연도별 선택월 평균)
-    avg_row = pivot.mean(axis=0, skipna=True)
-    pivot_with_avg = pd.concat([pivot, pd.DataFrame([avg_row], index=["평균"])])
-
-    # y 라벨: MM-DD (평균행은 '평균')
-    y_labels = [f"{sel_month:02d}-{int(d):02d}" for d in pivot.index]
-    y_labels.append("평균")
-
-    Z = pivot_with_avg.values.astype(float)
-    X = pivot_with_avg.columns.tolist()   # 연도
-    Y = y_labels
-
-    # 색상 기준: 선택 구간(해당 월 전체)의 평균
-    zmid = float(np.nanmean(pivot.values))
-    heat = go.Figure(data=go.Heatmap(
-        z=Z, x=X, y=Y, colorscale="RdBu_r", zmid=zmid,
-        colorbar=dict(title="°C"),
-        hoverongaps=False,
-        hovertemplate="연도=%{x}<br>일자=%{y}<br>평균기온=%{z:.1f}℃<extra></extra>"
-    ))
-    heat.update_layout(
-        template="simple_white",
-        font=dict(family=PLOT_FONT, size=13),
-        margin=dict(l=40, r=20, t=40, b=40),
-        xaxis=dict(title="Year", tickmode="linear", dtick=1, showgrid=False),
-        yaxis=dict(title="Day", autorange="reversed", showgrid=False),
-        title=f"{sel_month:02d}월 일일 평균기온 히트맵 (선택연도 {len(X)}개)"
+# ── 컨트롤: 연도 범위(바) + 월 선택(단일)
+c1, c2 = st.columns([2,1])
+with c1:
+    sel_range = st.slider("연도 범위", min_value=y_min, max_value=y_max,
+                          value=(y_min, y_max), step=1, key="g_year_range")
+with c2:
+    default_month = int(dt["month"].iloc[-1])
+    sel_month = st.selectbox(
+        "월 선택", options=months_all,
+        index=months_all.index(default_month),
+        format_func=lambda m: f"{m:02d} ({month_names[m]})",
+        key="g_month"
     )
 
-    # 상단 요약: 선택월 연도별 평균을 '막대그래프(bar)'로 시각화
-    avg_for_bar = avg_row.dropna().sort_index()
-    bar_fig = go.Figure(data=go.Bar(x=avg_for_bar.index.astype(int), y=avg_for_bar.values,
-                                    hovertemplate="연도=%{x}<br>월평균=%{y:.1f}℃<extra></extra>"))
-    bar_fig.update_layout(
-        template="simple_white",
-        font=dict(family=PLOT_FONT, size=12),
-        margin=dict(l=40, r=20, t=20, b=40),
-        xaxis=dict(title="Year", tickmode="linear", dtick=1, showgrid=False),
-        yaxis=dict(title="평균기온(℃)", showgrid=True),
-        title=f"{sel_month:02d}월 연도별 평균기온(막대 요약)"
-    )
+sel_years = [y for y in years_all if sel_range[0] <= y <= sel_range[1]]
 
-    st.plotly_chart(bar_fig, use_container_width=True, config={"displaylogo": False})
-    st.plotly_chart(heat,    use_container_width=True, config={"displaylogo": False})
-
-    # 표 요약
-    col_a, col_b = st.columns([3,2])
-    with col_a:
-        st.markdown("**선택 월 요약(연도별 평균, ℃)**")
-        st.dataframe(avg_row.round(1).to_frame(name="평균기온(℃)").T.style.format("{:.1f}"))
-    with col_b:
-        st.markdown("**색 기준(zmid)**")
-        st.metric("선택구간 평균(℃)", f"{zmid:.1f}")
-else:
+# ── 필터: 선택 월만 (예: 3월이면 3/1~3/31만)
+dsel = dt[(dt["year"].isin(sel_years)) & (dt["month"] == sel_month)].copy()
+if dsel.empty:
+    st.info("선택한 연·월에 데이터가 없습니다.")
     st.stop()
+
+# ── 피벗: 행=일 1~말일, 열=연도
+last_day = int(dsel["day"].max())
+pivot = (dsel.pivot_table(index="day", columns="year", values="tmean", aggfunc="mean")
+               .reindex(range(1, last_day+1)))
+
+# 하단 평균행(선택 월의 연도별 평균)
+avg_row = pivot.mean(axis=0, skipna=True)
+pivot_with_avg = pd.concat([pivot, pd.DataFrame([avg_row], index=["평균"])])
+
+# y 라벨: MM-DD (평균행은 '평균')
+y_labels = [f"{sel_month:02d}-{int(d):02d}" for d in pivot.index]
+y_labels.append("평균")
+
+Z = pivot_with_avg.values.astype(float)
+X = pivot_with_avg.columns.tolist()   # 연도
+Y = y_labels
+
+# 색상 중심: 선택 월 전체 평균
+zmid = float(np.nanmean(pivot.values))
+
+heat = go.Figure(data=go.Heatmap(
+    z=Z, x=X, y=Y, colorscale="RdBu_r", zmid=zmid,
+    colorbar=dict(title="°C"),
+    hoverongaps=False,
+    hovertemplate="연도=%{x}<br>일자=%{y}<br>평균기온=%{z:.1f}℃<extra></extra>"
+))
+heat.update_layout(
+    template="simple_white",
+    font=dict(family=PLOT_FONT, size=13),
+    margin=dict(l=40, r=20, t=40, b=40),
+    xaxis=dict(title="Year", tickmode="linear", dtick=1, showgrid=False),
+    yaxis=dict(title="Day", autorange="reversed", showgrid=False, type="category"),
+    title=f"{sel_month:02d}월 일일 평균기온 히트맵 (선택연도 {len(X)}개)"
+)
+
+st.plotly_chart(heat, use_container_width=True, config={"displaylogo": False})
+
+# 표 요약(확인용)
+col_a, col_b = st.columns([3,2])
+with col_a:
+    st.markdown("**선택 월 요약(연도별 평균, ℃)**")
+    st.dataframe(avg_row.round(1).to_frame(name="평균기온(℃)").T.style.format("{:.1f}"))
+with col_b:
+    st.markdown("**색 기준(zmid)**")
+    st.metric("선택구간 평균(℃)", f"{zmid:.1f}")
