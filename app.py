@@ -167,7 +167,7 @@ ci_lo_90, ci_hi_90, y_pred, sigma2, XtX_inv = conf_band_y(
 
 # ── 도함수(민감도) ───────────────────────────────────────────
 J = np.vstack([np.ones_like(tgrid)*0, np.ones_like(tgrid), 2*tgrid, 3*(tgrid**2)]).T
-deriv_mean = np.array([d1_at(m_all, t) for t in tgrid])       # dQ/dT
+deriv_mean = np.array([d1_at(m_all, t) for t in tgrid])        # dQ/dT
 deriv_se   = np.sqrt(np.sum(J @ XtX_inv * J, axis=1) * sigma2)
 z90 = 1.645
 d_lo = deriv_mean - z90*deriv_se
@@ -329,6 +329,11 @@ def band_mean(temp_array, apply_cold=True):
         base = base * cf
     return float(np.mean(base))
 
+# [추가된 부분: 전체 평균 기온에서의 변화량 계산]
+total_mean_temp = train["temp"].mean()
+avg_total = band_mean([total_mean_temp], apply_cold=True)
+avg_total_nm3 = to_m3_per_deg(avg_total, calorific)
+
 band = {"−5~0℃": np.arange(-5, 0.001, 0.1),
         "0~5℃" : np.arange(0, 5.001, 0.1),
         "5~10℃": np.arange(5,10.001,0.1)}
@@ -342,14 +347,10 @@ avg_m5_0_nm3 = to_m3_per_deg(avg_m5_0, calorific)
 avg_0_5_nm3  = to_m3_per_deg(avg_0_5,  calorific)
 avg_5_10_nm3 = to_m3_per_deg(avg_5_10, calorific)
 
+# [수정된 부분: 마크다운에 Total Avg 항목 추가]
 st.markdown(
 f"""
-**Polynomial Regression (degree 3)**  
-**{eq_str}**  
-
-- **Supply ↑ per −1°C from 0→−5℃**: **{fmt_int(avg_m5_0)} MJ/℃, {fmt_int(avg_m5_0_nm3)} Nm³/℃ (단위열량 {calorific:.3f} MJ/Nm³ 적용)**  
-- **Supply ↑ per −1°C from 5→0℃** : **{fmt_int(avg_0_5)} MJ/℃, {fmt_int(avg_0_5_nm3)} Nm³/℃ (단위열량 {calorific:.3f} MJ/Nm³ 적용)**  
-- **Supply ↑ per −1°C from 10→5℃**: **{fmt_int(avg_5_10)} MJ/℃, {fmt_int(avg_5_10_nm3)} Nm³/℃ (단위열량 {calorific:.3f} MJ/Nm³ 적용)**
+**Polynomial Regression (degree 3)** **{eq_str}** - **Supply ↑ per −1°C (Total Avg @ {total_mean_temp:.1f}℃)** : **{fmt_int(avg_total)} MJ/℃, {fmt_int(avg_total_nm3)} Nm³/℃ (단위열량 {calorific:.3f} MJ/Nm³ 적용)** - **Supply ↑ per −1°C from 0→−5℃**: **{fmt_int(avg_m5_0)} MJ/℃, {fmt_int(avg_m5_0_nm3)} Nm³/℃ (단위열량 {calorific:.3f} MJ/Nm³ 적용)** - **Supply ↑ per −1°C from 5→0℃** : **{fmt_int(avg_0_5)} MJ/℃, {fmt_int(avg_0_5_nm3)} Nm³/℃ (단위열량 {calorific:.3f} MJ/Nm³ 적용)** - **Supply ↑ per −1°C from 10→5℃**: **{fmt_int(avg_5_10)} MJ/℃, {fmt_int(avg_5_10_nm3)} Nm³/℃ (단위열량 {calorific:.3f} MJ/Nm³ 적용)**
 """
 )
 
@@ -438,7 +439,7 @@ def build_xlsx_bytes():
     with pd.ExcelWriter(buf, engine=engine) as wr:
         summary = pd.DataFrame({
             "항목":["식(Poly-3)","R²","Start θ*","Slowdown","Saturation(추정)",
-                   "T_cold(℃)","τ(℃)","시나리오 사용여부","열량(MJ/Nm³)"],
+                  "T_cold(℃)","τ(℃)","시나리오 사용여부","열량(MJ/Nm³)"],
             "값":[eq_str, r2, theta_star, T_slow, T_cap, T_COLD_FIXED, TAU_FIXED, use_cold, calorific]
         })
         summary.to_excel(wr, index=False, sheet_name="Summary")
@@ -476,7 +477,6 @@ import streamlit as st
 
 PLOT_FONT = "Noto Sans KR"
 
-st.set_page_config(page_title="G. 기온분석 — 히트맵", layout="wide")
 st.subheader("🧊 G. 기온분석 — 일일 평균기온 히트맵")
 
 @st.cache_data(show_spinner=False)
@@ -560,7 +560,7 @@ if dsel.empty or last_day == 0:
     st.stop()
 
 pivot = (dsel.pivot_table(index="day", columns="year", values="tmean", aggfunc="mean")
-               .reindex(range(1, last_day+1)))
+                .reindex(range(1, last_day+1)))
 
 avg_row = pivot.mean(axis=0, skipna=True)
 pivot_with_avg = pd.concat([pivot, pd.DataFrame([avg_row], index=["평균"])])
