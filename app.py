@@ -329,7 +329,7 @@ def band_mean(temp_array, apply_cold=True):
         base = base * cf
     return float(np.mean(base))
 
-# [추가된 부분: 전체 평균 기온에서의 변화량 계산]
+# [추가됨] 전체 학습 데이터의 평균 기온 계산
 total_mean_temp = train["temp"].mean()
 avg_total = band_mean([total_mean_temp], apply_cold=True)
 avg_total_nm3 = to_m3_per_deg(avg_total, calorific)
@@ -347,10 +347,15 @@ avg_m5_0_nm3 = to_m3_per_deg(avg_m5_0, calorific)
 avg_0_5_nm3  = to_m3_per_deg(avg_0_5,  calorific)
 avg_5_10_nm3 = to_m3_per_deg(avg_5_10, calorific)
 
-# [수정된 부분: 마크다운에 Total Avg 항목 추가]
+# [수정됨] 줄바꿈과 리스트 형식을 적용하여 가독성 개선
 st.markdown(
 f"""
-**Polynomial Regression (degree 3)** **{eq_str}** - **Supply ↑ per −1°C (Total Avg @ {total_mean_temp:.1f}℃)** : **{fmt_int(avg_total)} MJ/℃, {fmt_int(avg_total_nm3)} Nm³/℃ (단위열량 {calorific:.3f} MJ/Nm³ 적용)** - **Supply ↑ per −1°C from 0→−5℃**: **{fmt_int(avg_m5_0)} MJ/℃, {fmt_int(avg_m5_0_nm3)} Nm³/℃ (단위열량 {calorific:.3f} MJ/Nm³ 적용)** - **Supply ↑ per −1°C from 5→0℃** : **{fmt_int(avg_0_5)} MJ/℃, {fmt_int(avg_0_5_nm3)} Nm³/℃ (단위열량 {calorific:.3f} MJ/Nm³ 적용)** - **Supply ↑ per −1°C from 10→5℃**: **{fmt_int(avg_5_10)} MJ/℃, {fmt_int(avg_5_10_nm3)} Nm³/℃ (단위열량 {calorific:.3f} MJ/Nm³ 적용)**
+**Polynomial Regression (degree 3)** **{eq_str}**
+
+- **Supply ↑ per −1°C (Total Avg @ {total_mean_temp:.1f}℃)** : **{fmt_int(avg_total)} MJ/℃, {fmt_int(avg_total_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
+- **Supply ↑ per −1°C from 0→−5℃**: **{fmt_int(avg_m5_0)} MJ/℃, {fmt_int(avg_m5_0_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
+- **Supply ↑ per −1°C from 5→0℃** : **{fmt_int(avg_0_5)} MJ/℃, {fmt_int(avg_0_5_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
+- **Supply ↑ per −1°C from 10→5℃**: **{fmt_int(avg_5_10)} MJ/℃, {fmt_int(avg_5_10_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
 """
 )
 
