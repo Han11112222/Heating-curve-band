@@ -291,7 +291,7 @@ st.plotly_chart(figA, use_container_width=True, config={"displaylogo": False})
 # ── (B) 수요곡선 — 힌지 시각화 (수정됨: 일일 데이터 시각화를 위해 점 크기 축소) ───────────────
 st.subheader("🧊 B. Heating Start / Slowdown — 수요곡선")
 tline = np.linspace(xmin_vis, xmax_vis, 600)
-qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, 2.0)
+qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, 1.0) # ★수정됨: 2.0에서 1.0으로 변경하여 곡선이 중앙을 관통하도록 보완
 
 figB = go.Figure()
 figB.add_trace(go.Scatter(x=df["temp"], y=df["Q"], mode="markers", name="전체(참고)",
@@ -305,11 +305,11 @@ figB.add_trace(go.Scatter(
 
 figB.add_vrect(x0=xmin_vis, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.18, line_width=0, layer="below")
 figB.add_annotation(x=(xmin_vis+theta_star)/2, y=1.12, xref="x", yref="paper",
-                    text="Heating Start Zone", showarrow=False,
+                    text="난방 시작 구간 (Heating Start)", showarrow=False, # ★수정됨: 직관적인 한글 주석으로 변경
                     font=dict(size=12), bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
 figB.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.14, line_width=0, layer="below")
 figB.add_annotation(x=(xmin_vis+T_slow)/2, y=1.12, xref="x", yref="paper",
-                    text=f"Heating Slowdown Zone (≤ {T_slow:.2f}℃)", showarrow=False,
+                    text=f"난방 포화 구간 (총 사용량 증가, 증가폭은 둔화 ≤ {T_slow:.2f}℃)", showarrow=False, # ★수정됨: 직관적인 한글 주석으로 변경
                     font=dict(size=12), bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
 figB.add_vline(x=theta_star, line_dash="dash")
 figB.add_annotation(x=theta_star, y=1.14, xref="x", yref="paper",
@@ -423,8 +423,10 @@ def top_note(x, text, y=1.12):
     figE.add_annotation(x=x, y=y, xref="x", yref="paper", showarrow=False, text=text,
                         font=dict(size=12), bgcolor="rgba(255,255,255,0.75)",
                         bordercolor="rgba(0,0,0,0.12)", borderwidth=1)
-top_note((xmin_vis+T_slow)/2,  f"Heating Slowdown (≤ {T_slow:.2f}℃)")
-top_note((T_slow+theta_star)/2, f"Heating Start ({T_slow:.2f}~{theta_star:.2f}℃)")
+                        
+top_note((xmin_vis+T_slow)/2,  f"난방 포화 구간 (증가폭 둔화, ≤ {T_slow:.2f}℃)") # ★수정됨: 직관적인 한글 주석으로 변경
+top_note((T_slow+theta_star)/2, f"난방 시작 구간 ({T_slow:.2f}~{theta_star:.2f}℃)") # ★수정됨: 직관적인 한글 주석으로 변경
+
 figE.add_vline(x=theta_star, line_dash="dash", line_color="black")
 figE.add_annotation(x=theta_star, y=1.14, xref="x", yref="paper",
                     text=f"Start θ* {theta_star:.2f}℃", showarrow=False,
