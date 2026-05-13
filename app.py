@@ -85,7 +85,7 @@ def fmt_int(x):
     except Exception:
         return str(x)
 
-# ── Excel Loader ─────────────────────────────────────────────
+# ── Loader ─────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def read_excel_cached(path_or_buf) -> pd.DataFrame:
     try:
@@ -103,18 +103,30 @@ def read_excel_cached(path_or_buf) -> pd.DataFrame:
         st.error(f"엑셀 로딩 문제: {type(e).__name__} — {e}")
         st.stop()
 
-# ── 데이터 입력 ──────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def load_google_sheet_csv(url: str) -> pd.DataFrame:
+    try:
+        return pd.read_csv(url)
+    except Exception as e:
+        st.error(f"구글 시트 연동 오류: {type(e).__name__} — {e}")
+        st.stop()
+
+# ── 데이터 입력 (수정됨: 구글 시트 연동) ──────────────────────────────────────────────
 st.sidebar.header("① 데이터")
-repo_file = "실적.xlsx"
-uploaded = st.sidebar.file_uploader("엑셀(.xlsx) 업로드 (없으면 리포지토리 파일 사용)", type=["xlsx"])
+
+# 구글 시트 URL을 CSV 다운로드 링크로 변환
+SHEET_ID = "13HrIz6OytYDykXeXzXJ02I6XbaKin1YaKBoO2kBd6Bs"
+GID = "0"
+SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
+
+uploaded = st.sidebar.file_uploader("엑셀 직접 업로드 (선택사항)", type=["xlsx"])
 if uploaded is not None:
     raw = read_excel_cached(uploaded)
-elif os.path.exists(repo_file):
-    st.sidebar.info("리포지토리의 '실적.xlsx' 자동 사용")
-    raw = read_excel_cached(repo_file)
+    st.sidebar.success("업로드된 파일을 사용합니다.")
 else:
-    st.info("엑셀을 업로드하거나 리포지토리에 '실적.xlsx'를 넣어줘.")
-    st.stop()
+    # 파일 업로드가 없으면 기본적으로 지정한 구글 시트(일일실적)를 불러옵니다.
+    raw = load_google_sheet_csv(SHEET_CSV_URL)
+    st.sidebar.info("구글 시트(일일실적) 데이터 연동 완료")
 
 cols = raw.columns.tolist()
 st.sidebar.header("② 컬럼 매핑")
@@ -122,11 +134,12 @@ def _pick(cands, default_idx=0):
     for k in cands:
         for c in cols:
             if k in str(c): return c
-    return cols[default_idx]
+    return cols[default_idx] if len(cols) > default_idx else cols[-1]
 
-date_col = st.sidebar.selectbox("날짜", cols, index=cols.index(_pick(["날짜","date"])) if _pick(["날짜","date"]) in cols else 0)
+# 구글 시트에 맞게 기본 매핑 단어에 '일자', '공급량(MJ)' 우선 반영
+date_col = st.sidebar.selectbox("날짜", cols, index=cols.index(_pick(["일자","날짜","date"])) if _pick(["일자","날짜","date"]) in cols else 0)
 temp_col = st.sidebar.selectbox("평균기온(℃)", cols, index=cols.index(_pick(["평균기온","기온","temp"])) if _pick(["평균기온","기온","temp"]) in cols else 1)
-q_col    = st.sidebar.selectbox("공급량(MJ)", cols, index=cols.index(_pick(["공급량","총","total","MJ"])) if _pick(["공급량","총","total","MJ"]) in cols else 2)
+q_col    = st.sidebar.selectbox("공급량(MJ)", cols, index=cols.index(_pick(["공급량(MJ)","공급량","총","total","MJ"])) if _pick(["공급량(MJ)","공급량","총","total","MJ"]) in cols else 2)
 
 df = raw.copy()
 df["date"] = pd.to_datetime(df[date_col])
@@ -201,7 +214,6 @@ if use_cold:
 else:
     cold_factor = np.ones_like(tgrid)
 
-# ▶▶ 여기서 'inc/lo/hi'를 명시적으로 정의
 inc    = base_inc * cold_factor
 inc_lo = base_lo  * cold_factor
 inc_hi = base_hi  * cold_factor
@@ -239,7 +251,6 @@ T_slow   = float(tgrid[int(np.argmin(deriv_mean))])
 max_neg  = float(np.max(inc))
 T_cap    = float(tgrid[np.argmax(inc <= 0.02*max_neg)]) if max_neg>0 else np.nan
 
-# ========== 힌지(큐빅) 곡선(시각화용) ==========
 def fit_hinge_cubic(T: np.ndarray, Q: np.ndarray, theta: float) -> Tuple[float,float,float,float]:
     H = np.clip(theta - T, 0, None)
     X = np.column_stack([np.ones_like(H), H, H**2, H**3])
@@ -247,16 +258,17 @@ def fit_hinge_cubic(T: np.ndarray, Q: np.ndarray, theta: float) -> Tuple[float,f
     a_c, b_c, c_c, d_c = map(float, beta)
     return a_c, b_c, c_c, d_c
 a_c, b_c, c_c, d_c = fit_hinge_cubic(train["temp"].values, train["Q"].values, theta_star)
+
 def qhat_cubic(t: np.ndarray, theta: float, a_c: float, b_c: float, c_c: float, d_c: float, k: float) -> np.ndarray:
     H = np.clip(theta - t, 0, None)
     return a_c + b_c*H + (k*c_c)*(H**2) + (k*d_c)*(H**3)
 
-# ── (A) 상관 그래프 ─────────────────────────────────────────
+# ── (A) 상관 그래프 (수정됨: 일일 데이터 시각화를 위해 점 크기 축소) ────────────────────────
 st.subheader("🧮 A. 기온–공급량 상관 (Poly-3, 90% CI)")
 figA = go.Figure()
 figA.add_trace(go.Scatter(
     x=train["temp"], y=train["Q"], mode="markers", name="샘플",
-    marker=dict(size=8, opacity=0.75, line=dict(width=0.5), symbol="circle"),
+    marker=dict(size=4, opacity=0.5, line=dict(width=0.2), symbol="circle"),
     hovertemplate="T=%{x:.2f}℃<br>Q=%{y:,.0f} MJ<extra></extra>"
 ))
 figA.add_trace(go.Scatter(
@@ -276,16 +288,16 @@ figA.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14)
                    title=f"R²={r2:.3f} · 식: {eq_str}")
 st.plotly_chart(figA, use_container_width=True, config={"displaylogo": False})
 
-# ── (B) 수요곡선 — 힌지 시각화 ─────────────────────────────
+# ── (B) 수요곡선 — 힌지 시각화 (수정됨: 일일 데이터 시각화를 위해 점 크기 축소) ───────────────
 st.subheader("🧊 B. Heating Start / Slowdown — 수요곡선")
 tline = np.linspace(xmin_vis, xmax_vis, 600)
 qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, 2.0)
 
 figB = go.Figure()
 figB.add_trace(go.Scatter(x=df["temp"], y=df["Q"], mode="markers", name="전체(참고)",
-                          marker=dict(size=6, color="lightgray"), opacity=0.45))
+                          marker=dict(size=3, color="lightgray"), opacity=0.3))
 figB.add_trace(go.Scatter(x=train["temp"], y=train["Q"], mode="markers", name="학습",
-                          marker=dict(size=7), marker_color="orange"))
+                          marker=dict(size=4), marker_color="orange", opacity=0.6))
 figB.add_trace(go.Scatter(
     x=tline, y=qhat_curve, mode="lines", name="힌지(곡선) 적합",
     line=dict(width=3, shape="spline", smoothing=1.1)
@@ -329,7 +341,6 @@ def band_mean(temp_array, apply_cold=True):
         base = base * cf
     return float(np.mean(base))
 
-# [추가됨] 전체 학습 데이터의 평균 기온 계산
 total_mean_temp = train["temp"].mean()
 avg_total = band_mean([total_mean_temp], apply_cold=True)
 avg_total_nm3 = to_m3_per_deg(avg_total, calorific)
@@ -342,12 +353,10 @@ avg_m5_0  = band_mean(band["−5~0℃"], apply_cold=True)
 avg_0_5   = band_mean(band["0~5℃"],  apply_cold=True)
 avg_5_10  = band_mean(band["5~10℃"], apply_cold=True)
 
-# Nm³/℃ 환산
 avg_m5_0_nm3 = to_m3_per_deg(avg_m5_0, calorific)
 avg_0_5_nm3  = to_m3_per_deg(avg_0_5,  calorific)
 avg_5_10_nm3 = to_m3_per_deg(avg_5_10, calorific)
 
-# [수정됨] 줄바꿈과 리스트 형식을 적용하여 가독성 개선
 st.markdown(
 f"""
 **Polynomial Regression (degree 3)** **{eq_str}**
@@ -471,53 +480,34 @@ st.download_button(
 st.caption("본 화면의 기본 수치는 Raw(Poly-3 직접 민감도)이며, ‘저온 완화’는 별도 시나리오로만 적용됩니다.")
 
 # ============================================================
-# G. 기온분석 — 선택 월 히트맵(일자×연도) + 하단 평균행(색+숫자)
-#   - 세로 높이 = 가로 폭의 2/3 * 1.30  (현재보다 30% 늘림)
+# G. 기온분석 — 선택 월 히트맵(일자×연도) (수정됨: 상단 구글시트 데이터 공용사용)
 # ============================================================
-import os
-import numpy as np
-import pandas as pd
-import plotly.graph_objects as go
-import streamlit as st
-
 PLOT_FONT = "Noto Sans KR"
 
 st.subheader("🧊 G. 기온분석 — 일일 평균기온 히트맵")
 
-@st.cache_data(show_spinner=False)
-def _read_excel(file_like):
-    return pd.read_excel(file_like)
-
-@st.cache_data(show_spinner=False)
-def load_daily_temp():
-    up = st.session_state.get("g_daily_upload", None)
-    if up is not None:
-        return _read_excel(up)
-    for p in ["일일기온.xlsx", "일일기온"]:
-        if os.path.exists(p):
-            return _read_excel(p)
-    return pd.DataFrame()
-
-u = st.file_uploader("일일기온 파일 업로드(XLSX)", type=["xlsx"], key="g_daily_uploader")
+# 파일 업로드(옵션)가 없으면 위에서 읽어들인 구글시트(raw)를 그대로 사용
+u = st.file_uploader("히트맵용 파일 별도 업로드 (선택사항)", type=["xlsx"], key="g_daily_uploader")
 if u is not None:
-    st.session_state["g_daily_upload"] = u
+    dt_raw = pd.read_excel(u)
+else:
+    dt_raw = raw.copy() # 상단 구글 시트 데이터를 히트맵에도 동일하게 적용
 
-raw = load_daily_temp()
-if raw.empty:
-    st.warning("‘일일기온.xlsx’를 업로드하거나 리포지토리에 넣어줘.")
+if dt_raw.empty:
+    st.warning("데이터가 없습니다.")
     st.stop()
 
-def _guess(df: pd.DataFrame, keys, default=None):
+def _guess_g(df: pd.DataFrame, keys, default=None):
     for k in keys:
         for c in df.columns:
             if k in str(c):
                 return c
     return default
 
-date_c  = _guess(raw, ["날짜","Date","date"], raw.columns[0])
-tmean_c = _guess(raw, ["평균기온","기온","Tmean","avg"], raw.columns[1])
+date_c  = _guess_g(dt_raw, ["일자","날짜","Date","date"], dt_raw.columns[0])
+tmean_c = _guess_g(dt_raw, ["평균기온","기온","Tmean","avg"], dt_raw.columns[1])
 
-dt = raw.copy()
+dt = dt_raw.copy()
 dt["date"]  = pd.to_datetime(dt[date_c], errors="coerce")
 dt["tmean"] = pd.to_numeric(dt[tmean_c], errors="coerce")
 dt = dt.dropna(subset=["date","tmean"]).sort_values("date").reset_index(drop=True)
@@ -586,7 +576,7 @@ if Z.shape[0] > 0:
 # ── 사이즈: 가로 기준 2/3에서 30% 추가 → 2/3 * 1.30
 base_cell_px = 34
 approx_width_px = max(600, len(X) * base_cell_px)
-height = max(360, int(approx_width_px * 2/3 * 1.30))  # ★ 여기만 변경
+height = max(360, int(approx_width_px * 2/3 * 1.30)) 
 
 heat = go.Figure(data=go.Heatmap(
     z=Z,
