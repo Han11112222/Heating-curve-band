@@ -620,11 +620,13 @@ text = np.where(
     ""
 )
 
-# 셀 크기 기반 높이 계산 (행 수 × 셀 높이)
-cell_h = 28   # 셀당 픽셀
+# 셀 크기 기반 높이/너비 계산
+cell_h = 28   # 셀당 높이 픽셀
+cell_w = 38   # 셀당 너비 픽셀 (2번째 사진 기준)
 n_rows = len(Y)
 n_cols = len(X)
 height = max(500, n_rows * cell_h + 120)
+width  = max(800, n_cols * cell_w + 120)   # ★추가: 좌우 너비 동적 계산
 
 # 연도 수에 따라 폰트 크기 자동 조정 (연도가 많을수록 작게)
 font_size = max(8, min(13, int(260 / max(n_cols, 1))))
@@ -650,7 +652,7 @@ heat.update_layout(
     # x축(연도)을 상단에 표시
     xaxis=dict(
         title="연도",
-        side="top",                 # ★ x축 상단
+        side="top",
         type="category",
         tickmode="linear",
         dtick=1,
@@ -661,11 +663,12 @@ heat.update_layout(
     yaxis=dict(
         title="Day",
         type="category",
-        autorange="reversed",       # 01일이 위로
+        autorange="reversed",
         showgrid=False,
         tickfont=dict(size=12),
     ),
     title=f"{sel_month:02d}월 일일 평균기온 히트맵 (선택연도 {n_cols}개)",
     height=height,
+    width=width,   # ★추가
 )
-st.plotly_chart(heat, use_container_width=True, config={"displaylogo": False})
+st.plotly_chart(heat, use_container_width=False, config={"displaylogo": False})
