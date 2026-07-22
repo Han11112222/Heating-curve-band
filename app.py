@@ -446,7 +446,7 @@ def band_plot(ax, loT, hiT, label):
                       xaxis=dict(title="기온(℃)", range=[loT, hiT]),
                       yaxis=dict(title="Δ1℃ 증가량(MJ/℃)", tickformat=","),
                       title=f"Band {label} Response")
-    ax.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    ax.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True, "modeBarButtonsToAdd": ["resetScale2d"]})
 
 with tab1: band_plot(st, -5, 0, "−5~0℃")
 with tab2: band_plot(st, 0, 5, "0~5℃")
