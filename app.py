@@ -74,11 +74,12 @@ def nice_poly_string(a,b,c,d, digits=1):
         if abs(v) < 1e-12: return ""
         sign = "" if lead and v>=0 else (" - " if v<0 else " + ")
         return f"{sign}{abs(v):,.{digits}f}{s}"
-    s = f"y = {a:,.{digits}f}"
-    s += term(b, "·T")
+    # ★수정됨: T³ → T² → T → 절편 순 (고차항 우선)
+    s = term(d, "·T³", lead=True)
     s += term(c, "·T²")
-    s += term(d, "·T³")
-    return s
+    s += term(b, "·T")
+    s += term(a, "")
+    return "y = " + s
 
 def fmt_int(x):
     try:
