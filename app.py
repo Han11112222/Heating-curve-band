@@ -370,7 +370,7 @@ figB.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14)
                    xaxis=dict(title="기온(℃)", range=[xmin_vis, xmax_vis]),
                    yaxis=dict(title="공급량(MJ)", tickformat=","),
                    legend=dict(orientation="h", yanchor="top", y=-0.18, x=0.01))
-st.plotly_chart(figB, use_container_width=True, config={"displaylogo": False})
+st.plotly_chart(figB, use_container_width=True, config={"displaylogo": False, "scrollZoom": True, "modeBarButtonsToAdd": ["resetScale2d"]})
 
 # ── (C) 기온별 공급량 변화량 요약 ───────────────────────────
 st.subheader("🌡️ C. 기온별 공급량 변화량 요약")
