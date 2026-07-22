@@ -144,17 +144,16 @@ temp_mode = st.sidebar.radio(
 )
 # ── ★추가됨 끝 ───────────────────────────────────────────────────────────────────
 
-st.sidebar.header("③ 컬럼 매핑")
+# ③ 컬럼 매핑 — UI 숨김, 자동 매핑 로직만 유지
 def _pick(cands, default_idx=0):
     for k in cands:
         for c in cols:
             if k in str(c): return c
     return cols[default_idx] if len(cols) > default_idx else cols[-1]
 
-# 구글 시트에 맞게 기본 매핑 단어에 '일자', '공급량(MJ)' 우선 반영
-date_col = st.sidebar.selectbox("날짜", cols, index=cols.index(_pick(["일자","날짜","date"])) if _pick(["일자","날짜","date"]) in cols else 0)
-temp_col = st.sidebar.selectbox("평균기온(℃)", cols, index=cols.index(_pick(["평균기온","기온","temp"])) if _pick(["평균기온","기온","temp"]) in cols else 1)
-q_col    = st.sidebar.selectbox("공급량(MJ)", cols, index=cols.index(_pick(["공급량(MJ)","공급량","총","total","MJ"])) if _pick(["공급량(MJ)","공급량","총","total","MJ"]) in cols else 2)
+date_col = _pick(["일자","날짜","date"])
+temp_col = _pick(["평균기온","기온","temp"])
+q_col    = _pick(["공급량(MJ)","공급량","총","total","MJ"])
 
 df = raw.copy()
 df["date"] = pd.to_datetime(df[date_col])
@@ -264,7 +263,7 @@ inc_hi = base_hi  * cold_factor
 # ── 열량 입력(환산) ──────────────────────────────────────────
 st.sidebar.header("⑥ 열량(환산 단위)")
 calorific = st.sidebar.number_input(
-    "열량 (MJ/Nm³)", min_value=30.000, max_value=55.000, value=42.369, step=0.001, format="%.3f"
+    "열량 (MJ/Nm³)", min_value=30.000, max_value=55.000, value=42.563, step=0.001, format="%.3f"
 )
 def to_m3_per_deg(mj_per_deg: float, cv: float) -> float:
     if cv is None or cv <= 0:
@@ -405,9 +404,9 @@ f"""
 **Polynomial Regression (degree 3)** **{eq_str}**
 
 - **Supply ↑ per −1°C (Total Avg @ {total_mean_temp:.1f}℃)** : **{fmt_int(avg_total)} MJ/℃, {fmt_int(avg_total_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
-- **Supply ↑ per −1°C from 0→−5℃**: **{fmt_int(avg_m5_0)} MJ/℃, {fmt_int(avg_m5_0_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
-- **Supply ↑ per −1°C from 5→0℃** : **{fmt_int(avg_0_5)} MJ/℃, {fmt_int(avg_0_5_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
-- **Supply ↑ per −1°C from 10→5℃**: **{fmt_int(avg_5_10)} MJ/℃, {fmt_int(avg_5_10_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
+- **Supply ↑ per −1°C (−5~0℃)** : **{fmt_int(avg_m5_0)} MJ/℃, {fmt_int(avg_m5_0_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
+- **Supply ↑ per −1°C (0~5℃)**  : **{fmt_int(avg_0_5)} MJ/℃, {fmt_int(avg_0_5_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
+- **Supply ↑ per −1°C (5~10℃)** : **{fmt_int(avg_5_10)} MJ/℃, {fmt_int(avg_5_10_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
 """
 )
 
