@@ -443,10 +443,15 @@ def band_plot(ax, loT, hiT, label):
         fig.update_yaxes(range=[y_min - pad, y_max + pad])
     fig.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
                       margin=dict(l=40,r=20,t=40,b=40),
-                      xaxis=dict(title="기온(℃)", range=[loT, hiT]),
-                      yaxis=dict(title="Δ1℃ 증가량(MJ/℃)", tickformat=","),
-                      title=f"Band {label} Response")
-    ax.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True, "modeBarButtonsToAdd": ["resetScale2d"]})
+                      xaxis=dict(title="기온(℃)", range=[loT, hiT], fixedrange=True),
+                      yaxis=dict(title="Δ1℃ 증가량(MJ/℃)", tickformat=",", fixedrange=False),
+                      title=f"Band {label} Response",
+                      dragmode="zoom")
+    ax.plotly_chart(fig, use_container_width=True, config={
+        "displaylogo": False,
+        "scrollZoom": True,
+        "modeBarButtonsToAdd": ["resetScale2d"],
+    })
 
 with tab1: band_plot(st, -5, 0, "−5~0℃")
 with tab2: band_plot(st, 0, 5, "0~5℃")
