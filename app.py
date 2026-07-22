@@ -330,7 +330,7 @@ figA.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14)
                    xaxis=dict(title="기온(℃)", range=[xmin_vis, xmax_vis]),
                    yaxis=dict(title="공급량(MJ)", tickformat=","), 
                    title=f"R²={r2:.3f} · 식: {eq_str}")
-st.plotly_chart(figA, use_container_width=True, config={"displaylogo": False})
+st.plotly_chart(figA, use_container_width=True, config={"displaylogo": False, "scrollZoom": True, "modeBarButtonsToAdd": ["resetScale2d"]})
 
 # ── (B) 수요곡선 — 힌지 시각화 (수정됨: 일일 데이터 시각화를 위해 점 크기 축소) ───────────────
 st.subheader("🧊 B. Heating Start / Slowdown — 수요곡선")
