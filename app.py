@@ -652,6 +652,6 @@ heat.update_layout(
         side="top",       # x축(연도) 상단
     ),
 )
-heat.update_traces(textfont=dict(size=14))
+heat.update_traces(textfont=dict(size=12))
 
 st.plotly_chart(heat, use_container_width=True, config={"displaylogo": False})
