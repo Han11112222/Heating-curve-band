@@ -129,7 +129,22 @@ else:
     st.sidebar.info("구글 시트(일일실적) 데이터 연동 완료")
 
 cols = raw.columns.tolist()
-st.sidebar.header("② 컬럼 매핑")
+
+# ── ★추가됨: 기온 데이터 유형 선택 ──────────────────────────────────────────────────
+# 일일평균기온(원본) vs 월평균기온(월별 집계) 중 선택하여 분석에 사용
+st.sidebar.header("② 기온 데이터 유형")
+temp_mode = st.sidebar.radio(
+    "분석에 사용할 기온 유형",
+    options=["일일평균기온", "월평균기온"],
+    index=0,
+    help=(
+        "• 일일평균기온: 원본 일별 데이터 그대로 사용 (분산 큼, 극단 기온 반영)\n"
+        "• 월평균기온: 월별로 기온·공급량을 평균 집계 후 사용 (평활화, 계절 패턴 강조)"
+    )
+)
+# ── ★추가됨 끝 ───────────────────────────────────────────────────────────────────
+
+st.sidebar.header("③ 컬럼 매핑")
 def _pick(cands, default_idx=0):
     for k in cands:
         for c in cols:
@@ -149,13 +164,41 @@ df["temp"] = df[temp_col].apply(to_num)
 df["Q"]    = df[q_col].apply(to_num)
 df = df.dropna(subset=["temp","Q"]).sort_values("date")
 
+# ── ★추가됨: 기온 유형에 따라 분석용 데이터프레임(df_model) 분기 ─────────────────────
+# df_model 은 이후 train 생성, 그래프 A·B·산점도 학습 데이터로만 사용
+# G섹션(히트맵) 등 원본 일일 데이터를 쓰는 곳은 df / raw 그대로 유지
+if temp_mode == "월평균기온":
+    # 월별 집계: 기온은 평균, 공급량은 합산
+    # → 월 단위 분석이므로 공급량은 월합계가 물리적으로 맞음
+    df_monthly = (
+        df.groupby(["year", "month"])
+        .agg(temp=("temp", "mean"), Q=("Q", "sum"))
+        .reset_index()
+    )
+    # 대표 날짜(월 1일)를 date 컬럼으로 부여 (year/month 컬럼 유지)
+    df_monthly["date"] = pd.to_datetime(
+        df_monthly[["year","month"]].assign(day=1)
+    )
+    df_model = df_monthly.sort_values("date").reset_index(drop=True)
+    mode_label = "월평균기온 기반 (월합산 공급량)"
+else:
+    df_model = df.copy()
+    mode_label = "일일평균기온 기반 (일별 공급량)"
+
+st.info(f"📊 현재 분석 모드: **{mode_label}** · 분석 행 수: {len(df_model):,}")
+# ── ★추가됨 끝 ───────────────────────────────────────────────────────────────────
+
 st.success(f"행 {len(df):,} · 기간 {df['date'].min().date()} ~ {df['date'].max().date()}")
 
 # 학습 연도
-st.sidebar.header("③ 학습 연도")
+st.sidebar.header("④ 학습 연도")
 years = sorted(df["year"].unique().tolist())
 sel_years = st.sidebar.multiselect("연도 선택", years, default=years)
-train = df[df["year"].isin(sel_years)].copy()
+
+# ── ★수정됨: train을 df_model 기준으로 생성 (기존: df 기준) ──────────────────────────
+train = df_model[df_model["year"].isin(sel_years)].copy()
+# ── ★수정됨 끝 ───────────────────────────────────────────────────────────────────
+
 if train.empty:
     st.warning("선택된 연도에 데이터가 없습니다."); st.stop()
 
@@ -196,7 +239,7 @@ base_lo  = smooth_relu(-d_hi, eps_rel)
 base_hi  = smooth_relu(-d_lo, eps_rel)
 
 # ── 저온 완화(시나리오 토글만, 기본 OFF) ─────────────────────
-st.sidebar.header("④ 시뮬레이션 옵션")
+st.sidebar.header("⑤ 시뮬레이션 옵션")
 auto_zoom = st.sidebar.toggle("밴드 자동 Y축 줌(곡률 강조)", value=True)
 use_cold  = st.sidebar.toggle("저온 완화 시나리오(극저온에서 증가량 둔화)", value=False)
 
@@ -219,7 +262,7 @@ inc_lo = base_lo  * cold_factor
 inc_hi = base_hi  * cold_factor
 
 # ── 열량 입력(환산) ──────────────────────────────────────────
-st.sidebar.header("⑤ 열량(환산 단위)")
+st.sidebar.header("⑥ 열량(환산 단위)")
 calorific = st.sidebar.number_input(
     "열량 (MJ/Nm³)", min_value=30.000, max_value=55.000, value=42.369, step=0.001, format="%.3f"
 )
@@ -294,7 +337,7 @@ tline = np.linspace(xmin_vis, xmax_vis, 600)
 qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, 1.0) # ★수정됨: 2.0에서 1.0으로 변경하여 곡선이 중앙을 관통하도록 보완
 
 figB = go.Figure()
-figB.add_trace(go.Scatter(x=df["temp"], y=df["Q"], mode="markers", name="전체(참고)",
+figB.add_trace(go.Scatter(x=df_model["temp"], y=df_model["Q"], mode="markers", name="전체(참고)",
                           marker=dict(size=3, color="lightgray"), opacity=0.3))
 figB.add_trace(go.Scatter(x=train["temp"], y=train["Q"], mode="markers", name="학습",
                           marker=dict(size=4), marker_color="orange", opacity=0.6))
@@ -305,11 +348,11 @@ figB.add_trace(go.Scatter(
 
 figB.add_vrect(x0=xmin_vis, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.18, line_width=0, layer="below")
 figB.add_annotation(x=(xmin_vis+theta_star)/2, y=1.12, xref="x", yref="paper",
-                    text="난방 시작 구간 (Heating Start)", showarrow=False, # ★수정됨: 직관적인 한글 주석으로 변경
+                    text="난방 시작 구간 (Heating Start)", showarrow=False,
                     font=dict(size=12), bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
 figB.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.14, line_width=0, layer="below")
 figB.add_annotation(x=(xmin_vis+T_slow)/2, y=1.12, xref="x", yref="paper",
-                    text=f"난방 포화 구간 (총 사용량 증가, 증가폭은 둔화 ≤ {T_slow:.2f}℃)", showarrow=False, # ★수정됨: 직관적인 한글 주석으로 변경
+                    text=f"난방 포화 구간 (총 사용량 증가, 증가폭은 둔화 ≤ {T_slow:.2f}℃)", showarrow=False,
                     font=dict(size=12), bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
 figB.add_vline(x=theta_star, line_dash="dash")
 figB.add_annotation(x=theta_star, y=1.14, xref="x", yref="paper",
@@ -424,8 +467,8 @@ def top_note(x, text, y=1.12):
                         font=dict(size=12), bgcolor="rgba(255,255,255,0.75)",
                         bordercolor="rgba(0,0,0,0.12)", borderwidth=1)
                         
-top_note((xmin_vis+T_slow)/2,  f"난방 포화 구간 (증가폭 둔화, ≤ {T_slow:.2f}℃)") # ★수정됨: 직관적인 한글 주석으로 변경
-top_note((T_slow+theta_star)/2, f"난방 시작 구간 ({T_slow:.2f}~{theta_star:.2f}℃)") # ★수정됨: 직관적인 한글 주석으로 변경
+top_note((xmin_vis+T_slow)/2,  f"난방 포화 구간 (증가폭 둔화, ≤ {T_slow:.2f}℃)")
+top_note((T_slow+theta_star)/2, f"난방 시작 구간 ({T_slow:.2f}~{theta_star:.2f}℃)")
 
 figE.add_vline(x=theta_star, line_dash="dash", line_color="black")
 figE.add_annotation(x=theta_star, y=1.14, xref="x", yref="paper",
@@ -479,7 +522,7 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-st.caption("본 화면의 기본 수치는 Raw(Poly-3 직접 민감도)이며, ‘저온 완화’는 별도 시나리오로만 적용됩니다.")
+st.caption("본 화면의 기본 수치는 Raw(Poly-3 직접 민감도)이며, '저온 완화'는 별도 시나리오로만 적용됩니다.")
 
 # ============================================================
 # G. 기온분석 — 선택 월 히트맵(일자×연도) (수정됨: 상단 구글시트 데이터 공용사용)
