@@ -604,23 +604,30 @@ pivot = (dsel.pivot_table(index="day", columns="year", values="tmean", aggfunc="
 avg_row = pivot.mean(axis=0, skipna=True)
 pivot_with_avg = pd.concat([pivot, pd.DataFrame([avg_row], index=["평균"])])
 
+# y축 라벨: 일자는 MM-DD, 마지막은 "평균"
 y_labels = [f"{sel_month:02d}-{int(d):02d}" for d in pivot.index]
 y_labels.append("평균")
 
 Z = pivot_with_avg.values.astype(float)
-X = pivot_with_avg.columns.tolist()
+X = [str(yr) for yr in pivot_with_avg.columns.tolist()]  # 연도 문자열
 Y = y_labels
 zmid = float(np.nanmean(pivot.values))
 
-text = np.full_like(Z, "", dtype=object)
-if Z.shape[0] > 0:
-    last_idx = Z.shape[0] - 1
-    text[last_idx, :] = [f"{v:.1f}" if np.isfinite(v) else "" for v in Z[last_idx, :]]
+# ★수정됨: 모든 셀에 수치 표기 (2번째 사진 스타일)
+text = np.where(
+    np.isfinite(Z),
+    np.vectorize(lambda v: f"{v:.1f}")(Z),
+    ""
+)
 
-# ── 사이즈: 가로 기준 2/3에서 30% 추가 → 2/3 * 1.30
-base_cell_px = 34
-approx_width_px = max(600, len(X) * base_cell_px)
-height = max(360, int(approx_width_px * 2/3 * 1.30)) 
+# 셀 크기 기반 높이 계산 (행 수 × 셀 높이)
+cell_h = 28   # 셀당 픽셀
+n_rows = len(Y)
+n_cols = len(X)
+height = max(500, n_rows * cell_h + 120)
+
+# 연도 수에 따라 폰트 크기 자동 조정 (연도가 많을수록 작게)
+font_size = max(8, min(13, int(260 / max(n_cols, 1))))
 
 heat = go.Figure(data=go.Heatmap(
     z=Z,
@@ -628,20 +635,37 @@ heat = go.Figure(data=go.Heatmap(
     y=Y,
     colorscale="RdBu_r",
     zmid=zmid,
-    colorbar=dict(title="°C"),
+    colorbar=dict(title="평균기온(℃)", thickness=15, len=0.9),
     hoverongaps=False,
     hovertemplate="연도=%{x}<br>일자=%{y}<br>평균기온=%{z:.1f}℃<extra></extra>",
     text=text,
     texttemplate="%{text}",
-    textfont={"size": 12}
+    textfont={"size": font_size},
 ))
+
 heat.update_layout(
     template="simple_white",
     font=dict(family=PLOT_FONT, size=13),
-    margin=dict(l=40, r=20, t=40, b=40),
-    xaxis=dict(title="Year", tickmode="linear", dtick=1, showgrid=False),
-    yaxis=dict(title="Day", autorange="reversed", showgrid=False, type="category"),
-    title=f"{sel_month:02d}월 일일 평균기온 히트맵 (선택연도 {len(X)}개)",
-    height=height
+    margin=dict(l=60, r=20, t=80, b=20),
+    # x축(연도)을 상단에 표시
+    xaxis=dict(
+        title="연도",
+        side="top",                 # ★ x축 상단
+        type="category",
+        tickmode="linear",
+        dtick=1,
+        tickangle=0,
+        showgrid=False,
+    ),
+    # y축(일자)을 좌측, 위→아래 순
+    yaxis=dict(
+        title="Day",
+        type="category",
+        autorange="reversed",       # 01일이 위로
+        showgrid=False,
+        tickfont=dict(size=12),
+    ),
+    title=f"{sel_month:02d}월 일일 평균기온 히트맵 (선택연도 {n_cols}개)",
+    height=height,
 )
 st.plotly_chart(heat, use_container_width=True, config={"displaylogo": False})
