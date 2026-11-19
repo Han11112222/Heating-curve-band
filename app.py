@@ -697,19 +697,20 @@ else:
             wdf["t_bin"] = pd.cut(wdf["temp"], bins=edges, right=False)
             H_LABELS = ["건조(50% 미만)", "보통(50~70%)", "습함(70% 이상)"]
             wdf["h_bin"] = pd.cut(wdf["hum"], bins=[0, 50, 70, 101], labels=H_LABELS, right=False)
-            gw = wdf.groupby(["t_bin", "h_bin"], observed=False)["res_pct"].agg(["mean", "count"]).unstack("h_bin")
+            gw = wdf.groupby(["t_bin", "h_bin"], observed=False)["res_pct"].agg(["mean", "std", "count"]).unstack("h_bin")
             MIN_N = 5
 
-            trows, chart_x, chart_y, w_list, d_list = [], [], [], [], []
+            trows, chart_x, chart_y, chart_ci, chart_n, w_list, d_list = [], [], [], [], [], [], []
             for tb in gw.index:
                 center = (tb.left + tb.right) / 2.0
                 q_center = float(poly3_predict(m_h, pf_h, [center])[0])      # 구간 중심 기온의 Poly-3 추정 공급량
                 row = {"기온 구간": f"{int(tb.left)}~{int(tb.right)}℃"}
-                vals, cnts = {}, {}
+                vals, cnts, sds = {}, {}, {}
                 for hl in H_LABELS:
                     n_c = int(gw[("count", hl)].get(tb, 0)) if ("count", hl) in gw.columns else 0
                     m_c = gw[("mean", hl)].get(tb, np.nan) if ("mean", hl) in gw.columns else np.nan
                     cnts[hl] = n_c
+                    sds[hl] = gw[("std", hl)].get(tb, np.nan) if ("std", hl) in gw.columns else np.nan
                     vals[hl] = q_center * (1 + m_c / 100.0) if (n_c >= MIN_N and np.isfinite(m_c)) else np.nan
                     row[hl.split("(")[0] + " (MJ)"] = "-" if not np.isfinite(vals[hl]) else f"{vals[hl]:,.0f}"
                 dry_v, wet_v = vals[H_LABELS[0]], vals[H_LABELS[2]]
@@ -720,6 +721,10 @@ else:
                     nd, nw = cnts[H_LABELS[0]], cnts[H_LABELS[2]]
                     w_list.append(nd * nw / (nd + nw)); d_list.append((dmj, dmj / dry_v * 100))
                     chart_x.append(row["기온 구간"]); chart_y.append(dmj / dry_v * 100)
+                    sd_d, sd_w = sds[H_LABELS[0]], sds[H_LABELS[2]]
+                    chart_ci.append(1.645 * float(np.sqrt(sd_w ** 2 / nw + sd_d ** 2 / nd))
+                                    if (np.isfinite(sd_d) and np.isfinite(sd_w)) else 0.0)
+                    chart_n.append(nw)
                 else:
                     row["습함−건조 (MJ)"] = "-"; row["차이 (%)"] = "-"
                 row["일수 (건/보/습)"] = f"{cnts[H_LABELS[0]]} / {cnts[H_LABELS[1]]} / {cnts[H_LABELS[2]]}"
@@ -733,10 +738,15 @@ else:
                 hum_wet = float(wdf.loc[wdf["h_bin"] == H_LABELS[2], "hum"].mean())
                 st.success(f"동절기 같은 기온대에서 습도가 높은 날(평균 {hum_wet:.0f}%)은 낮은 날(평균 {hum_dry:.0f}%)보다 "
                            f"공급량이 평균 **{avg_pc:+.1f}%** (하루 약 {avg_mj:+,.0f} MJ) 차이가 났습니다.")
-                fig_t = go.Figure(go.Bar(x=chart_x, y=chart_y, marker_color="#2B5FA8",
-                                         text=[f"{v:+.1f}%" for v in chart_y], textposition="outside",
-                                         hovertemplate="%{x}<br>습함−건조 %{y:+.2f}%<extra></extra>"))
-                fig_t.add_hline(y=0, line_dash="dash", line_color="#7F9CC0")
+                fig_t = go.Figure(go.Bar(
+                    x=[f"{cx}<br>{cy:+.1f}%<br>(습함 {cn}일)" for cx, cy, cn in zip(chart_x, chart_y, chart_n)],
+                    y=chart_y, marker_color="#2B5FA8",
+                    error_y=dict(type="data", array=chart_ci, visible=True, color="#7F9CC0"),
+                    hovertemplate="%{y:+.2f}%<extra></extra>"))
+                fig_t.add_hline(y=0, line_color="#B8C7DA", line_width=1)
+                fig_t.add_hline(y=avg_pc, line_dash="dash", line_color="#1E3F7A", line_width=2,
+                                annotation_text=f"전체 평균 {avg_pc:+.1f}%", annotation_position="top left",
+                                annotation_font=dict(color="#1E3F7A", size=13))
                 fig_t.update_layout(template="simple_white", bargap=0.45, font=dict(family=PLOT_FONT, size=13),
                                     margin=dict(l=40, r=20, t=30, b=40),
                                     xaxis=dict(title="평균기온 구간"),
@@ -747,6 +757,7 @@ else:
                 st.info("건조·습함 구간을 함께 비교할 수 있는 기온 구간이 없습니다(구간별 5일 미만).")
 
             st.dataframe(pd.DataFrame(trows).set_index("기온 구간"), use_container_width=True)
+            st.caption("막대 위 선은 90% 신뢰구간입니다. 습한 날 표본이 적은 구간은 선이 길어지며, 그 구간의 막대 높이는 우연일 수 있으니 점선(전체 평균)을 기준으로 보세요.")
             st.caption("12~2월 평일, 난방기 기준. 각 칸의 공급량은 '구간 중심 기온'에서의 Poly-3 추정값에 해당 습도 구간의 평균 잔차를 반영한 값이라, "
                        "구간 안의 기온 차이가 섞이지 않습니다. 표본이 5일 미만인 칸은 '-'로 표시합니다. 공휴일은 별도로 제외하지 않았습니다.")
 
