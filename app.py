@@ -592,9 +592,9 @@ else:
         dd = dd.dropna(subset=["h_anom"])
 
         figH1 = go.Figure()
-        for col_name, color in [("전체 평균습도(%)", "#334E68"),      # 진한 슬레이트 블루
-                                ("맑은 날 평균습도(%)", "#9FB3C8"),    # 연한 회청색
-                                ("흐림·비 평균습도(%)", "#627D98")]:   # 중간 회청색
+        for col_name, color in [("전체 평균습도(%)", "#2B5FA8"),      # 선명한 미드 블루
+                                ("맑은 날 평균습도(%)", "#A5CBF0"),    # 연한 스카이 블루
+                                ("흐림·비 평균습도(%)", "#5B93D3")]:   # 중간 블루
             if col_name in base_tbl.columns:
                 figH1.add_trace(go.Bar(x=[f"{m}월" for m in base_tbl.index], y=base_tbl[col_name],
                                        name=col_name, marker_color=color))
@@ -602,7 +602,7 @@ else:
                             font=dict(family=PLOT_FONT, size=13),
                             margin=dict(l=40, r=20, t=30, b=40),
                             yaxis=dict(title="평균습도(%)", range=[0, 100],
-                                       showgrid=True, gridcolor="#E5E9F0", zeroline=False),
+                                       showgrid=True, gridcolor="#E6EEF8", zeroline=False),
                             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
         st.plotly_chart(figH1, use_container_width=True, config={"displaylogo": False})
         disp_tbl = base_tbl.round(1)
@@ -634,7 +634,7 @@ else:
             figH2 = go.Figure(go.Bar(
                 x=gb.index.astype(str), y=gb["mean"],
                 error_y=dict(type="data", array=gb["ci90"].fillna(0).values, visible=True),
-                marker_color=["#9FB3C8" if (v is not None and v < 0) else "#334E68" for v in gb["mean"]],
+                marker_color=["#A5CBF0" if (v is not None and v < 0) else "#2B5FA8" for v in gb["mean"]],
                 text=[f"n={int(n)}" for n in gb["count"]], textposition="outside",
                 hovertemplate="%{x}<br>평균 잔차=%{y:.2f}%<extra></extra>"
             ))
@@ -680,7 +680,7 @@ else:
             heat_d["h_grp"] = np.where(heat_d["h_anom"] <= q1, "건조",
                                        np.where(heat_d["h_anom"] <= q2, "보통", "습함"))
             grp_names = ["건조", "보통", "습함"]
-            grp_colors = {"건조": "#9AA5B1", "보통": "#627D98", "습함": "#1F4E79"}
+            grp_colors = {"건조": "#8DB6E2", "보통": "#4F86C6", "습함": "#1E3F7A"}
             g_lo = heat_d.groupby("h_grp")["temp"].quantile(0.02).max()
             g_hi = heat_d.groupby("h_grp")["temp"].quantile(0.98).min()
 
