@@ -578,6 +578,9 @@ else:
         dd["Qhat"] = m_h.predict(Xh)
         dd = dd[dd["Qhat"] > 0].copy()
         dd["res_pct"] = (dd["Q"] - dd["Qhat"]) / dd["Qhat"] * 100.0
+        # 연도별 공급 수준 차이(고객 증가·설비 변화 등) 보정: 연도별 난방기 평균 잔차를 0으로 맞춤
+        yr_level = dd[dd["temp"] < theta_h].groupby("year")["res_pct"].mean()
+        dd["res_pct"] = dd["res_pct"] - dd["year"].map(yr_level).fillna(0.0)
 
         # 난방기 데이터 + 같은 달 평균 대비 습도(%p): 월별 습도 차이를 제거하고 비교
         heat_d = dd[dd["temp"] < theta_h].copy()
@@ -655,7 +658,7 @@ else:
                 "판정": "유의" if _sig(r) else ("확인 안 됨" if np.isfinite(r["eff"]) else "표본 부족"),
             })
         st.dataframe(pd.DataFrame(tbl_rows).set_index("계절"), use_container_width=True)
-        st.caption(f"방법: 난방기(평균기온 {theta_h:.1f}℃ 미만)만 사용 → 기온 효과는 Poly-3로 제거 → 남은 공급량 차이를 "
+        st.caption(f"방법: 난방기(평균기온 {theta_h:.1f}℃ 미만)만 사용 → 기온 효과는 Poly-3로 제거하고 연도별 공급 수준 차이도 보정 → 남은 공급량 차이를 "
                    "'같은 달 평균보다 습도가 10%p 높은 날'로 비교(기온·주말 통제). "
                    "맑은 날은 그 계절에서 일교차가 큰 상위 1/3인 날, 흐림·비는 하위 1/3인 날입니다.")
 
@@ -765,6 +768,17 @@ else:
             st.caption("막대 위 선은 90% 신뢰구간입니다. 습한 날 표본이 적은 구간은 선이 길어지며, 그 구간의 막대 높이는 우연일 수 있으니 점선(전체 평균)을 기준으로 보세요.")
             st.caption(f"동절기 평일 난방기 사용 기간: {wdf['date'].min().date()} ~ {wdf['date'].max().date()} ({len(wdf):,}일). "
                        "각 칸은 '12~2월 · 평일 · 해당 기온 구간 · 해당 습도 구간' 조건을 모두 만족하는 날만 세므로 일수가 많지 않을 수 있습니다.")
+            with st.expander("연도별 사용 일수 확인 (습도 데이터가 어느 해부터 쓰였는지)"):
+                base_yr = df[df["year"].isin(sel_years)].groupby("year").size()
+                hum_yr = df[df["year"].isin(sel_years)].dropna(subset=["hum"]).groupby("year").size()
+                use_yr = wdf.groupby("year").size()
+                yt = pd.DataFrame({"공급량·기온 있는 날": base_yr, "습도도 있는 날": hum_yr,
+                                   "동절기 평일 난방기(분석 사용)": use_yr}).fillna(0).astype(int)
+                yt["연도별 공급 수준(%)"] = yr_level.reindex(yt.index).round(1)
+                yt.index.name = "연도"
+                st.dataframe(yt, use_container_width=True)
+                st.caption("'습도도 있는 날'이 0이면 그 해는 습도 분석에 쓰이지 않습니다. '연도별 공급 수준'은 같은 기온 기준으로 "
+                           "전체 평균보다 그 해 공급량이 몇 % 높았는지를 나타내며, 분석에서는 이 차이를 제거했습니다.")
             st.caption("12~2월 평일, 난방기 기준. 각 칸의 공급량은 '구간 중심 기온'에서의 Poly-3 추정값에 해당 습도 구간의 평균 잔차를 반영한 값이라, "
                        "구간 안의 기온 차이가 섞이지 않습니다. 표본이 5일 미만인 칸은 '-'로 표시합니다. 공휴일은 별도로 제외하지 않았습니다.")
 
