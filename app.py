@@ -209,7 +209,9 @@ st.success(f"행 {len(df):,} · 기간 {df['date'].min().date()} ~ {df['date'].m
 # 학습 연도
 st.sidebar.header("④ 학습 연도")
 years = sorted(df["year"].unique().tolist())
-sel_years = st.sidebar.multiselect("연도 선택", years, default=years)
+DEFAULT_START_YEAR = 2016   # 습도 데이터가 있는 첫 해 (기본 학습 연도 시작)
+default_years = [y for y in years if y >= DEFAULT_START_YEAR] or years
+sel_years = st.sidebar.multiselect("연도 선택", years, default=default_years)
 
 # ── ★수정됨: train을 df_model 기준으로 생성 (기존: df 기준) ──────────────────────────
 train = df_model[df_model["year"].isin(sel_years)].copy()
@@ -565,6 +567,9 @@ else:
     if len(dd) < 200:
         st.info("선택한 학습 연도에 습도 데이터가 충분하지 않습니다.")
     else:
+        st.caption(f"분석에 사용한 데이터: {dd['date'].min().date()} ~ {dd['date'].max().date()} ({len(dd):,}일) — "
+                   "선택한 학습 연도 중 습도·기온·공급량이 모두 입력된 날만 사용합니다(습도가 비어 있는 연도는 자동 제외).")
+
         # 난방기 = 난방 시작 기온(θ*, B 그래프와 같은 방식) 미만인 날
         theta_h, _, _ = hinge_base_temp(dd["temp"].values, dd["Q"].values, 0.0, 20.0, 0.1)
 
@@ -747,7 +752,7 @@ else:
                 fig_t.add_hline(y=avg_pc, line_dash="dash", line_color="#1E3F7A", line_width=2,
                                 annotation_text=f"전체 평균 {avg_pc:+.1f}%", annotation_position="top left",
                                 annotation_font=dict(color="#1E3F7A", size=13))
-                fig_t.update_layout(template="simple_white", bargap=0.45, font=dict(family=PLOT_FONT, size=13),
+                fig_t.update_layout(template="simple_white", bargap=0.45, height=520, font=dict(family=PLOT_FONT, size=13),
                                     margin=dict(l=40, r=20, t=30, b=40),
                                     xaxis=dict(title="평균기온 구간"),
                                     yaxis=dict(title="습함 − 건조 공급량 차이(%)", showgrid=True,
@@ -758,6 +763,8 @@ else:
 
             st.dataframe(pd.DataFrame(trows).set_index("기온 구간"), use_container_width=True)
             st.caption("막대 위 선은 90% 신뢰구간입니다. 습한 날 표본이 적은 구간은 선이 길어지며, 그 구간의 막대 높이는 우연일 수 있으니 점선(전체 평균)을 기준으로 보세요.")
+            st.caption(f"동절기 평일 난방기 사용 기간: {wdf['date'].min().date()} ~ {wdf['date'].max().date()} ({len(wdf):,}일). "
+                       "각 칸은 '12~2월 · 평일 · 해당 기온 구간 · 해당 습도 구간' 조건을 모두 만족하는 날만 세므로 일수가 많지 않을 수 있습니다.")
             st.caption("12~2월 평일, 난방기 기준. 각 칸의 공급량은 '구간 중심 기온'에서의 Poly-3 추정값에 해당 습도 구간의 평균 잔차를 반영한 값이라, "
                        "구간 안의 기온 차이가 섞이지 않습니다. 표본이 5일 미만인 칸은 '-'로 표시합니다. 공휴일은 별도로 제외하지 않았습니다.")
 
