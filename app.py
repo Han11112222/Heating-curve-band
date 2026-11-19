@@ -546,15 +546,21 @@ st.download_button(
 st.caption("본 화면의 기본 수치는 Raw(Poly-3 직접 민감도)이며, '저온 완화'는 별도 시나리오로만 적용됩니다.")
 
 # ============================================================
-# H. 습도 분석 — 같은 기온에서 습도가 공급량에 준 영향 (과거 실적 해석용, 예측에는 사용하지 않음)
+# H. 습도 분석 — 계절별: 맑은 날 기준 습도 / 습도 +10%p당 공급량 영향 (과거 실적 해석용, 예측에는 사용하지 않음)
 # ============================================================
-st.subheader("💧 H. 습도 분석 — 같은 기온에서 습도가 공급량에 준 영향 (과거 실적)")
+st.subheader("💧 H. 습도 분석 — 계절별 맑은 날 기준 습도와 습도 +10%p당 공급량 영향 (과거 실적)")
+
+HUM_SEASONS = [("동절기 (12~2월)", [12, 1, 2]),
+               ("간절기·봄 (3~4월)", [3, 4]),
+               ("간절기·가을 (10~11월)", [10, 11])]
 
 if hum_col is None or int(df["hum"].notna().sum()) < 100:
     st.info("시트에서 '습도' 열을 찾지 못했거나 습도 데이터가 부족합니다.")
 else:
     dd = df[df["year"].isin(sel_years)].dropna(subset=["temp", "Q", "hum"]).copy()
-    dd["weekend"] = (dd["date"].dt.dayofweek >= 5).astype(float)   # 주말 효과 통제용
+    dd["dtr"] = dd["tmax"] - dd["tmin"]                              # 일교차 (맑은 날 대용 지표)
+    dd["weekend"] = (dd["date"].dt.dayofweek >= 5).astype(float)     # 주말 효과 통제용
+    has_dtr = int(dd["dtr"].notna().sum()) >= 200
 
     if len(dd) < 200:
         st.info("선택한 학습 연도에 습도 데이터가 충분하지 않습니다.")
@@ -567,142 +573,128 @@ else:
         dd["Qhat"] = m_h.predict(Xh)
         dd = dd[dd["Qhat"] > 0].copy()
         dd["res_pct"] = (dd["Q"] - dd["Qhat"]) / dd["Qhat"] * 100.0
+
+        # 난방기 데이터 + 같은 달 평균 대비 습도(%p): 월별 습도 차이를 제거하고 비교
         heat_d = dd[dd["temp"] < theta_h].copy()
-        # 같은 달 난방기 평균 습도 대비 차이(%p): 계절(월)에 따른 습도 차이를 제거하고 비교
         heat_d["hum_rel"] = heat_d["hum"] - heat_d.groupby("month")["hum"].transform("mean")
         heat_d = heat_d[heat_d.groupby("month")["hum"].transform("size") >= 15].copy()
 
-        if len(heat_d) < 90:
-            st.info("난방기 표본이 부족합니다. 학습 연도를 더 선택해 보세요.")
-        else:
-            st.caption(f"방법: 난방기(평균기온 {theta_h:.1f}℃ 미만, {len(heat_d):,}일)만 사용 → "
-                       "기온에 따른 공급량 변화는 Poly-3로 제거 → 남은 차이(잔차)를 '그 달 평균보다 습한 날 vs 건조한 날'로 비교합니다.")
+        def ols_fit(Xm, y):
+            beta_, *_ = np.linalg.lstsq(Xm, y, rcond=None)
+            resid_ = y - Xm @ beta_
+            n_, p_ = Xm.shape
+            s2_ = float(resid_ @ resid_) / max(1, n_ - p_)
+            cov_ = s2_ * np.linalg.pinv(Xm.T @ Xm)
+            return beta_, np.sqrt(np.diag(cov_))
 
-            def ols_fit(Xm, y):
-                beta_, *_ = np.linalg.lstsq(Xm, y, rcond=None)
-                resid_ = y - Xm @ beta_
-                n_, p_ = Xm.shape
-                s2_ = float(resid_ @ resid_) / max(1, n_ - p_)
-                cov_ = s2_ * np.linalg.pinv(Xm.T @ Xm)
-                return beta_, np.sqrt(np.diag(cov_))
+        res_rows = []
+        for sname, months in HUM_SEASONS:
+            s_all = dd[dd["month"].isin(months)]
+            s_heat = heat_d[heat_d["month"].isin(months)]
+            r = dict(season=sname, n_heat=len(s_heat), hum_all=float(s_all["hum"].mean()) if len(s_all) else np.nan,
+                     hum_clear=np.nan, hum_cloudy=np.nan, dtr_thr=np.nan, eff=np.nan, ci=np.nan, mj=np.nan)
+            # 맑은 날 = 그 계절에서 일교차가 큰 상위 1/3, 흐림·비 = 하위 1/3
+            if has_dtr and s_all["dtr"].notna().sum() >= 60:
+                hi_thr, lo_thr = s_all["dtr"].quantile([2 / 3, 1 / 3]).values
+                r["hum_clear"] = float(s_all.loc[s_all["dtr"] >= hi_thr, "hum"].mean())
+                r["hum_cloudy"] = float(s_all.loc[s_all["dtr"] <= lo_thr, "hum"].mean())
+                r["dtr_thr"] = float(hi_thr)
+            # 습도 +10%p당 공급량 변화 (기온·주말 통제, 난방기만)
+            if len(s_heat) >= 60:
+                Xr = np.column_stack([np.ones(len(s_heat)), s_heat["temp"].values,
+                                      s_heat["weekend"].values, s_heat["hum_rel"].values / 10.0])
+                b_, se_ = ols_fit(Xr, s_heat["res_pct"].values)
+                r["eff"] = float(b_[3]); r["ci"] = 1.645 * float(se_[3])
+                r["mj"] = r["eff"] / 100.0 * float(s_heat["Q"].mean())
+            res_rows.append(r)
 
-            # ── 핵심 숫자 ① 습도 +10%p당 효과 (기온·주말 통제) ─────
-            Xr = np.column_stack([np.ones(len(heat_d)), heat_d["temp"].values,
-                                  heat_d["weekend"].values, heat_d["hum_rel"].values / 10.0])
-            beta_r, se_r = ols_fit(Xr, heat_d["res_pct"].values)
-            eff = float(beta_r[3]); ci = 1.645 * float(se_r[3])
-            q_mean = float(heat_d["Q"].mean())
-            eff_mj = eff / 100.0 * q_mean
-            significant = (eff - ci > 0) or (eff + ci < 0)
+        def _sig(r):
+            return np.isfinite(r["eff"]) and ((r["eff"] - r["ci"] > 0) or (r["eff"] + r["ci"] < 0))
 
-            # ── 핵심 숫자 ② 습도 높은 순 3등분: 건조 / 보통 / 습함 ──
-            q1, q2 = heat_d["hum_rel"].quantile([1 / 3, 2 / 3]).values
-            heat_d["grp"] = np.where(heat_d["hum_rel"] <= q1, "건조",
-                                     np.where(heat_d["hum_rel"] <= q2, "보통", "습함"))
-            names = ["건조", "보통", "습함"]
-            gs = heat_d.groupby("grp")["res_pct"].agg(["mean", "std", "count"]).reindex(names)
-            gs["ci90"] = 1.645 * gs["std"] / np.sqrt(gs["count"].clip(lower=1))
-            hr = heat_d.groupby("grp")["hum_rel"].agg(["min", "max"]).reindex(names)
-            dry = heat_d.loc[heat_d["grp"] == "건조", "res_pct"]
-            wet = heat_d.loc[heat_d["grp"] == "습함", "res_pct"]
-            diff = float(wet.mean() - dry.mean())
-            diff_ci = 1.645 * float(np.sqrt(wet.var(ddof=1) / len(wet) + dry.var(ddof=1) / len(dry)))
-            diff_mj = diff / 100.0 * q_mean
+        def _proxy_ok(r):
+            return np.isfinite(r["hum_clear"]) and np.isfinite(r["hum_cloudy"]) and (r["hum_cloudy"] - r["hum_clear"] >= 5)
 
-            k1, k2, k3 = st.columns(3)
-            k1.metric("습도 +10%p → 공급량", f"{eff:+.2f} %",
-                      help="같은 기온·같은 요일 유형(평일/주말)에서, 그 달 평균보다 일평균 습도가 10%p 높을 때 공급량 변화")
-            k2.metric("일 공급량 환산", f"{eff_mj:+,.0f} MJ/일",
-                      help=f"난방기 평균 공급량 {fmt_int(q_mean)} MJ/일 기준")
-            k3.metric("습함 − 건조 (같은 기온)", f"{diff:+.2f} %",
-                      help="그 달 평균 대비 습도 상위 1/3 날과 하위 1/3 날의 공급량 차이(기온 효과 제거 후)")
-
-            if significant:
-                direction = "많았습니다" if eff > 0 else "적었습니다"
-                st.success(f"난방기에는 같은 기온이라도 그 달 평균보다 습도가 10%p 높은 날 공급량이 약 {abs(eff):.2f}% "
-                           f"(하루 {abs(eff_mj):,.0f} MJ) {direction}.")
+        # ── 핵심 문장: 동절기 ───────────────────────────────
+        w = res_rows[0]
+        if np.isfinite(w["eff"]):
+            base_txt = (f"맑은 날 기준 평균습도는 약 {w['hum_clear']:.0f}%" if np.isfinite(w["hum_clear"])
+                        else f"평균습도는 약 {w['hum_all']:.0f}%")
+            if _sig(w):
+                direction = "많아집니다" if w["eff"] > 0 else "적어집니다"
+                st.success(f"**동절기(12~2월)** {base_txt}이고, 습도가 10%p 높아지면 공급량이 약 "
+                           f"**{abs(w['eff']):.2f}%** (하루 약 {abs(w['mj']):,.0f} MJ) {direction}.")
             else:
-                st.info("같은 기온에서 습도에 따른 공급량 차이는 통계적으로 확인되지 않았습니다(신뢰구간이 0을 포함). "
-                        "습도는 참고 지표로만 보시길 권합니다.")
-            st.caption(f"90% 신뢰구간: {eff - ci:+.2f} ~ {eff + ci:+.2f}% (10%p당) · "
-                       f"습함−건조 {diff - diff_ci:+.2f} ~ {diff + diff_ci:+.2f}% · 통제변수: 기온, 주말 여부")
+                st.info(f"**동절기(12~2월)** {base_txt}입니다. 습도가 높아질 때 공급량이 변하는지는 통계적으로 확인되지 않았습니다"
+                        f"(추정 {w['eff']:+.2f}%/10%p, 90% 신뢰구간 {w['eff'] - w['ci']:+.2f} ~ {w['eff'] + w['ci']:+.2f}%).")
+            if np.isfinite(w["hum_clear"]) and not _proxy_ok(w):
+                st.warning(f"동절기는 일교차로 맑은 날을 구분하기 어렵습니다(흐림·비 평균습도와의 차이가 "
+                           f"{w['hum_cloudy'] - w['hum_clear']:.1f}%p). '맑은 날 기준 습도'는 참고용으로만 보세요.")
+        else:
+            st.info("동절기 난방기 표본이 부족해 효과를 계산하지 못했습니다. 학습 연도를 더 선택해 보세요.")
 
-            # ── 그래프: 건조 / 보통 / 습함 평균 잔차 ───────────────
-            fig_g = go.Figure(go.Bar(
-                x=[f"{n}<br>월 평균 대비 {hr.loc[n, 'min']:+.0f}~{hr.loc[n, 'max']:+.0f}%p<br>({int(gs.loc[n, 'count'])}일)"
-                   for n in names],
-                y=gs["mean"].values,
-                error_y=dict(type="data", array=gs["ci90"].fillna(0).values, visible=True,
-                             color="#7F9CC0"),
-                marker_color=["#A5CBF0", "#5B93D3", "#2B5FA8"],
-                hovertemplate="%{x}<br>평균 잔차=%{y:.2f}%<extra></extra>"
-            ))
-            fig_g.add_hline(y=0, line_dash="dash", line_color="#7F9CC0")
-            fig_g.update_layout(template="simple_white", bargap=0.45,
-                                font=dict(family=PLOT_FONT, size=13),
+        # ── 계절별 요약표 ───────────────────────────────────
+        def _fmt(v, f):
+            return "-" if (v is None or not np.isfinite(v)) else format(v, f)
+
+        tbl_rows = []
+        for r in res_rows:
+            tbl_rows.append({
+                "계절": r["season"],
+                "난방기 일수": r["n_heat"],
+                "맑은 날 평균습도(%)": _fmt(r["hum_clear"], ".1f"),
+                "전체 평균습도(%)": _fmt(r["hum_all"], ".1f"),
+                "흐림·비 평균습도(%)": _fmt(r["hum_cloudy"], ".1f"),
+                "습도 +10%p → 공급량(%)": _fmt(r["eff"], "+.2f"),
+                "90% 신뢰구간(%)": "-" if not np.isfinite(r["eff"]) else f"{r['eff'] - r['ci']:+.2f} ~ {r['eff'] + r['ci']:+.2f}",
+                "일 환산(MJ/일)": _fmt(r["mj"], "+,.0f"),
+                "판정": "유의" if _sig(r) else ("확인 안 됨" if np.isfinite(r["eff"]) else "표본 부족"),
+            })
+        st.dataframe(pd.DataFrame(tbl_rows).set_index("계절"), use_container_width=True)
+        st.caption(f"방법: 난방기(평균기온 {theta_h:.1f}℃ 미만)만 사용 → 기온 효과는 Poly-3로 제거 → 남은 공급량 차이를 "
+                   "'같은 달 평균보다 습도가 10%p 높은 날'로 비교(기온·주말 통제). "
+                   "맑은 날은 그 계절에서 일교차가 큰 상위 1/3인 날, 흐림·비는 하위 1/3인 날입니다.")
+
+        # ── 그래프: 계절별 습도 +10%p 효과 ─────────────────────
+        ok_rows = [r for r in res_rows if np.isfinite(r["eff"])]
+        if ok_rows:
+            fig_s = go.Figure(go.Bar(
+                x=[r["season"] for r in ok_rows], y=[r["eff"] for r in ok_rows],
+                error_y=dict(type="data", array=[r["ci"] for r in ok_rows], visible=True, color="#7F9CC0"),
+                marker_color=["#2B5FA8" if _sig(r) else "#A5CBF0" for r in ok_rows],
+                text=[f"{r['eff']:+.2f}%" for r in ok_rows], textposition="outside",
+                hovertemplate="%{x}<br>습도 +10%p당 %{y:+.2f}%<extra></extra>"))
+            fig_s.add_hline(y=0, line_dash="dash", line_color="#7F9CC0")
+            fig_s.update_layout(template="simple_white", bargap=0.5, font=dict(family=PLOT_FONT, size=13),
                                 margin=dict(l=40, r=20, t=30, b=40),
-                                yaxis=dict(title="기온 효과 제거 후 공급량 차이(%)",
-                                           showgrid=True, gridcolor="#E6EEF8", zeroline=False))
-            st.plotly_chart(fig_g, use_container_width=True, config={"displaylogo": False})
-            st.caption("0%보다 위면 같은 기온 대비 공급량이 많은 날, 아래면 적은 날입니다. 막대 위 선은 90% 신뢰구간입니다.")
+                                yaxis=dict(title="습도 +10%p당 공급량 변화(%)", showgrid=True,
+                                           gridcolor="#E6EEF8", zeroline=False))
+            st.plotly_chart(fig_s, use_container_width=True, config={"displaylogo": False})
+            st.caption("진한 파랑 = 통계적으로 유의, 연한 파랑 = 확인 안 됨(신뢰구간이 0을 포함). 막대 위 선은 90% 신뢰구간입니다.")
 
-            # ── 자세히 ① 기온별 곡선 ───────────────────────────
-            with st.expander("기온별로 자세히 보기 (건조/보통/습함 곡선)"):
-                g_lo = heat_d.groupby("grp")["temp"].quantile(0.02).max()
-                g_hi = heat_d.groupby("grp")["temp"].quantile(0.98).min()
-                if g_hi - g_lo > 3:
-                    tg_h = np.linspace(g_lo, g_hi, 200)
-                    grp_colors = {"건조": "#8DB6E2", "보통": "#4F86C6", "습함": "#1E3F7A"}
-                    curves = {}
-                    figH4 = go.Figure()
-                    for gname in names:
-                        sub = heat_d[heat_d["grp"] == gname]
-                        if len(sub) < 30:
-                            continue
-                        mg, pg, _ = fit_poly3(sub["temp"].values, sub["Q"].values)
-                        curves[gname] = (mg, pg)
-                        figH4.add_trace(go.Scatter(
-                            x=tg_h, y=poly3_predict(mg, pg, tg_h), mode="lines",
-                            name=f"{gname} (n={len(sub)})", line=dict(width=3, color=grp_colors[gname]),
-                            hovertemplate="T=%{x:.1f}℃<br>%{y:,.0f} MJ<extra>" + gname + "</extra>"))
-                    figH4.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=13),
-                                        margin=dict(l=40, r=20, t=30, b=40),
-                                        xaxis=dict(title="기온(℃)"),
-                                        yaxis=dict(title="공급량(MJ)", tickformat=",", gridcolor="#E6EEF8"),
-                                        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-                    st.plotly_chart(figH4, use_container_width=True, config={"displaylogo": False})
-                    if "건조" in curves and "습함" in curves:
-                        rows = []
-                        for tt in [0, 2, 4, 6, 8, 10, 12]:
-                            if not (g_lo <= tt <= g_hi):
-                                continue
-                            row = {"기온(℃)": tt}
-                            for gname in names:
-                                if gname in curves:
-                                    row[f"{gname}(MJ)"] = float(poly3_predict(curves[gname][0], curves[gname][1], [tt])[0])
-                            row["습함−건조(MJ)"] = row["습함(MJ)"] - row["건조(MJ)"]
-                            row["차이(%)"] = row["습함−건조(MJ)"] / row["건조(MJ)"] * 100
-                            rows.append(row)
-                        if rows:
-                            tbl = pd.DataFrame(rows).set_index("기온(℃)")
-                            st.dataframe(tbl.style.format("{:,.0f}", subset=[c for c in tbl.columns if c != "차이(%)"])
-                                             .format("{:+.1f}", subset=["차이(%)"]), use_container_width=True)
-                else:
-                    st.info("그룹별 곡선을 비교할 공통 기온 범위가 부족합니다.")
+        # ── 기준 습도 대비 변화별 영향(동절기 포함 전 계절) ───────
+        sens = []
+        for r in res_rows:
+            if np.isfinite(r["eff"]):
+                row = {"계절": r["season"],
+                       "기준 습도(%)": _fmt(r["hum_clear"] if np.isfinite(r["hum_clear"]) else r["hum_all"], ".0f")}
+                for dh in [-20, -10, 10, 20]:
+                    row[f"{dh:+d}%p"] = f"{r['eff'] * dh / 10.0:+.2f}%"
+                sens.append(row)
+        if sens:
+            st.markdown("**기준 습도 대비 습도가 변할 때 공급량 영향** (같은 기온 기준, 선형 가정)")
+            st.dataframe(pd.DataFrame(sens).set_index("계절"), use_container_width=True)
 
-            # ── 자세히 ② 월별 평균 습도(참고 기준) ───────────────
-            with st.expander("월별 평균 습도 (참고 기준)"):
-                hm = df[df["year"].isin(sel_years)].dropna(subset=["hum"]).groupby("month")["hum"].mean().reindex(range(1, 13))
-                figM = go.Figure(go.Bar(x=[f"{m}월" for m in hm.index], y=hm.values, marker_color="#5B93D3",
-                                        hovertemplate="%{x}<br>평균 습도=%{y:.1f}%<extra></extra>"))
-                figM.update_layout(template="simple_white", bargap=0.3,
-                                   font=dict(family=PLOT_FONT, size=13),
-                                   margin=dict(l=40, r=20, t=20, b=40),
-                                   yaxis=dict(title="평균습도(%)", range=[0, 100], gridcolor="#E6EEF8"))
-                st.plotly_chart(figM, use_container_width=True, config={"displaylogo": False})
-                st.caption(f"난방기(평균기온 {theta_h:.1f}℃ 미만) 평균 습도는 {heat_d['hum'].mean():.1f}%입니다.")
+        # ── 월별 평균 습도(참고) ─────────────────────────────
+        with st.expander("월별 평균 습도 (참고 기준)"):
+            hm = df[df["year"].isin(sel_years)].dropna(subset=["hum"]).groupby("month")["hum"].mean().reindex(range(1, 13))
+            figM = go.Figure(go.Bar(x=[f"{m}월" for m in hm.index], y=hm.values, marker_color="#5B93D3",
+                                    hovertemplate="%{x}<br>평균 습도=%{y:.1f}%<extra></extra>"))
+            figM.update_layout(template="simple_white", bargap=0.3, font=dict(family=PLOT_FONT, size=13),
+                               margin=dict(l=40, r=20, t=20, b=40),
+                               yaxis=dict(title="평균습도(%)", range=[0, 100], gridcolor="#E6EEF8"))
+            st.plotly_chart(figM, use_container_width=True, config={"displaylogo": False})
 
-            st.caption("습한 날은 흐림·비 날씨와 겹치기 쉬워, 위 차이에는 습도 자체의 영향과 일사량 부족의 영향이 함께 들어 있습니다.")
+        st.caption("습한 날은 흐림·비 날씨와 겹치기 쉬워, 위 영향에는 습도 자체의 효과와 일사량 부족의 효과가 함께 들어 있습니다.")
 
 # ============================================================
 # G. 기온분석 — 선택 월 히트맵(일자×연도) (수정됨: 상단 구글시트 데이터 공용사용)
