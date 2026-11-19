@@ -105,7 +105,7 @@ def read_excel_cached(path_or_buf) -> pd.DataFrame:
         st.error(f"엑셀 로딩 문제: {type(e).__name__} — {e}")
         st.stop()
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)   # ★수정됨: 1시간마다 시트를 다시 읽음
 def load_google_sheet_csv(url: str) -> pd.DataFrame:
     try:
         return pd.read_csv(url)
@@ -157,12 +157,27 @@ date_col = _pick(["일자","날짜","date"])
 temp_col = _pick(["평균기온","기온","temp"])
 q_col    = _pick(["공급량(MJ)","공급량","총","total","MJ"])
 
+# ── ★추가됨: 습도·최저/최고·계획 열 (없으면 None) ──
+def _find(cands):
+    for k in cands:
+        for c in cols:
+            if k in str(c): return c
+    return None
+hum_col  = _find(["습도", "humid"])
+tmin_col = _find(["최저"])
+tmax_col = _find(["최고"])
+plan_col = _find(["계획 공급량(MJ)", "계획공급량(MJ)"])
+
 df = raw.copy()
 df["date"] = pd.to_datetime(df[date_col])
 df["year"] = df["date"].dt.year
 df["month"]= df["date"].dt.month
 df["temp"] = df[temp_col].apply(to_num)
 df["Q"]    = df[q_col].apply(to_num)
+df["hum"]  = df[hum_col].apply(to_num)  if hum_col  else np.nan   # ★추가됨
+df["tmin"] = df[tmin_col].apply(to_num) if tmin_col else np.nan   # ★추가됨
+df["tmax"] = df[tmax_col].apply(to_num) if tmax_col else np.nan   # ★추가됨
+df["plan"] = df[plan_col].apply(to_num) if plan_col else np.nan   # ★추가됨
 df = df.dropna(subset=["temp","Q"]).sort_values("date")
 
 # ── ★추가됨: 기온 유형에 따라 분석용 데이터프레임(df_model) 분기 ─────────────────────
@@ -529,6 +544,194 @@ st.download_button(
 )
 
 st.caption("본 화면의 기본 수치는 Raw(Poly-3 직접 민감도)이며, '저온 완화'는 별도 시나리오로만 적용됩니다.")
+
+# ============================================================
+# H. 습도 분석 — 같은 기온에서 습도가 공급량에 준 영향 (과거 실적 해석용, 예측에는 사용하지 않음)
+# ============================================================
+st.subheader("💧 H. 습도 분석 — 같은 기온에서 습도가 공급량에 준 영향 (과거 실적)")
+
+if hum_col is None or int(df["hum"].notna().sum()) < 100:
+    st.info("시트에서 '습도' 열을 찾지 못했거나 습도 데이터가 부족합니다.")
+else:
+    hc1, hc2, hc3 = st.columns(3)
+    with hc1:
+        T_up = st.slider("난방 구간 상한 기온(℃)", 8.0, 20.0, 15.0, 0.5, key="h_tup")
+    with hc2:
+        clear_dtr = st.slider("맑은 날 기준: 일교차 ≥ (℃)", 8.0, 16.0, 12.0, 0.5, key="h_clear")
+    with hc3:
+        cloudy_dtr = st.slider("흐림·비 기준: 일교차 < (℃)", 2.0, 10.0, 6.0, 0.5, key="h_cloudy")
+
+    dd = df[df["year"].isin(sel_years)].dropna(subset=["temp", "Q", "hum"]).copy()
+    dd["dtr"] = dd["tmax"] - dd["tmin"]                       # 일교차 (맑은 날 대용 지표)
+    dd["weekend"] = (dd["date"].dt.dayofweek >= 5).astype(float)  # 주말 통제용
+
+    if len(dd) < 200:
+        st.info("선택한 학습 연도에 습도 데이터가 충분하지 않습니다.")
+    else:
+        # ── H-1. 월별 맑은 날 기준 습도 ───────────────────────
+        st.markdown("##### H-1. 월별 기준 습도 (맑은 날 = 일교차가 큰 날)")
+        if dd["dtr"].notna().any():
+            clear_d = dd[dd["dtr"] >= clear_dtr]
+            cloudy_d = dd[dd["dtr"] < cloudy_dtr]
+            base_tbl = pd.DataFrame({
+                "맑은 날 평균습도(%)": clear_d.groupby("month")["hum"].mean(),
+                "맑은 날 수": clear_d.groupby("month")["hum"].size(),
+                "전체 평균습도(%)": dd.groupby("month")["hum"].mean(),
+                "흐림·비 평균습도(%)": cloudy_d.groupby("month")["hum"].mean(),
+            }).reindex(range(1, 13))
+            clear_ok = base_tbl["맑은 날 수"].fillna(0) >= 5
+            base_map = base_tbl["맑은 날 평균습도(%)"].where(clear_ok, base_tbl["전체 평균습도(%)"])
+        else:
+            base_tbl = pd.DataFrame({"전체 평균습도(%)": dd.groupby("month")["hum"].mean()}).reindex(range(1, 13))
+            base_map = base_tbl["전체 평균습도(%)"]
+            st.warning("최저/최고기온 열이 없어 맑은 날 구분이 불가능합니다. 월 전체 평균습도를 기준으로 사용합니다.")
+
+        dd["h_base"] = dd["month"].map(base_map)
+        dd["h_anom"] = dd["hum"] - dd["h_base"]               # 기준 대비 습도 이상치(%p)
+        dd = dd.dropna(subset=["h_anom"])
+
+        figH1 = go.Figure()
+        for col_name, color in [("맑은 날 평균습도(%)", "#d97706"),
+                                ("전체 평균습도(%)", "#6b7280"),
+                                ("흐림·비 평균습도(%)", "#2563eb")]:
+            if col_name in base_tbl.columns:
+                figH1.add_trace(go.Bar(x=[f"{m}월" for m in base_tbl.index], y=base_tbl[col_name],
+                                       name=col_name, marker_color=color))
+        figH1.update_layout(template="simple_white", barmode="group",
+                            font=dict(family=PLOT_FONT, size=13),
+                            margin=dict(l=40, r=20, t=30, b=40),
+                            yaxis=dict(title="평균습도(%)", range=[0, 100]),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+        st.plotly_chart(figH1, use_container_width=True, config={"displaylogo": False})
+        st.dataframe(base_tbl.round(1), use_container_width=True)
+        st.caption("맑은 날 수가 5일 미만인 달은 전체 평균습도를 기준으로 대체합니다. "
+                   "일교차는 맑음 여부의 대용 지표이므로, 일조시간·전운량이 있으면 그 값으로 바꾸는 편이 더 정확합니다.")
+
+        # ── 기온 효과 제거: Poly-3 잔차(%) ───────────────────
+        m_h, pf_h, Xh = fit_poly3(dd["temp"].values, dd["Q"].values)
+        dd["Qhat"] = m_h.predict(Xh)
+        dd = dd[dd["Qhat"] > 0].copy()
+        dd["res_pct"] = (dd["Q"] - dd["Qhat"]) / dd["Qhat"] * 100.0
+        heat_d = dd[dd["temp"] < T_up].copy()
+
+        if len(heat_d) < 60:
+            st.info("난방 구간 표본이 부족합니다. 난방 구간 상한 기온을 올려 보세요.")
+        else:
+            # ── H-2. 습도 구간별 잔차 ─────────────────────────
+            st.markdown("##### H-2. 습도 구간별 공급량 잔차 (기온 효과 제거 후, 난방 구간)")
+            h_bins = [0, 50, 60, 70, 80, 101]
+            h_labels = ["50% 미만", "50~60%", "60~70%", "70~80%", "80% 이상"]
+            heat_d["h_bin"] = pd.cut(heat_d["hum"], bins=h_bins, labels=h_labels, right=False)
+            gb = heat_d.groupby("h_bin", observed=False)["res_pct"].agg(["mean", "std", "count"])
+            gb["ci90"] = 1.645 * gb["std"] / np.sqrt(gb["count"].clip(lower=1))
+
+            figH2 = go.Figure(go.Bar(
+                x=gb.index.astype(str), y=gb["mean"],
+                error_y=dict(type="data", array=gb["ci90"].fillna(0).values, visible=True),
+                marker_color=["#d97706" if (v is not None and v < 0) else "#2563eb" for v in gb["mean"]],
+                text=[f"n={int(n)}" for n in gb["count"]], textposition="outside",
+                hovertemplate="%{x}<br>평균 잔차=%{y:.2f}%<extra></extra>"
+            ))
+            figH2.add_hline(y=0, line_dash="dash", line_color="black")
+            figH2.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=13),
+                                margin=dict(l=40, r=20, t=30, b=40),
+                                xaxis=dict(title="일평균 습도 구간"),
+                                yaxis=dict(title="평균 잔차 (실적 대비 Poly-3 추정, %)"))
+            st.plotly_chart(figH2, use_container_width=True, config={"displaylogo": False})
+
+            # ── H-3. 습도 이상치 1단위당 효과 (기온·주말 통제) ───
+            st.markdown("##### H-3. 기준 습도 대비 +10%p 일 때 공급량 영향 (기온·주말 통제 회귀)")
+
+            def ols_fit(Xm, y):
+                beta_, *_ = np.linalg.lstsq(Xm, y, rcond=None)
+                resid_ = y - Xm @ beta_
+                n_, p_ = Xm.shape
+                s2_ = float(resid_ @ resid_) / max(1, n_ - p_)
+                cov_ = s2_ * np.linalg.pinv(Xm.T @ Xm)
+                return beta_, np.sqrt(np.diag(cov_)), float(np.sqrt(np.mean(resid_ ** 2)))
+
+            y_res = heat_d["res_pct"].values
+            X0 = np.column_stack([np.ones(len(heat_d)), heat_d["temp"].values, heat_d["weekend"].values])
+            X1 = np.column_stack([X0, heat_d["h_anom"].values / 10.0])
+            _, _, rmse0 = ols_fit(X0, y_res)
+            beta1, se1, rmse1 = ols_fit(X1, y_res)
+            eff = float(beta1[3]); ci = 1.645 * float(se1[3])
+            q_mean = float(heat_d["Q"].mean())
+            eff_mj = eff / 100.0 * q_mean
+            significant = (eff - ci > 0) or (eff + ci < 0)
+            gain = (1 - rmse1 / rmse0) * 100 if rmse0 > 0 else np.nan
+
+            k1, k2, k3 = st.columns(3)
+            k1.metric("습도 +10%p → 공급량", f"{eff:+.2f} %", f"90% CI {eff - ci:+.2f} ~ {eff + ci:+.2f}")
+            k2.metric("일 공급량 환산", f"{eff_mj:+,.0f} MJ/일", f"평균 {fmt_int(q_mean)} MJ/일 기준")
+            k3.metric("잔차 RMSE 개선", f"{gain:.1f} %", "통계적으로 유의" if significant else "유의하지 않음 (CI가 0 포함)")
+            st.caption(f"표본 {len(heat_d):,}일 · 기준습도 = 월별 맑은 날 평균 · 통제변수: 기온, 주말 여부. "
+                       "CI가 0을 포함하면 습도 효과는 데이터로 확인되지 않은 것입니다. 학습 구간 내 평가이며 예측력 검증은 아닙니다.")
+
+            # ── H-4. 습도 3분위별 기온-공급량 곡선 ─────────────
+            st.markdown("##### H-4. 같은 기온에서 습도 수준별 공급량 (건조 / 보통 / 습함)")
+            q1, q2 = heat_d["h_anom"].quantile([1 / 3, 2 / 3]).values
+            heat_d["h_grp"] = np.where(heat_d["h_anom"] <= q1, "건조",
+                                       np.where(heat_d["h_anom"] <= q2, "보통", "습함"))
+            grp_names = ["건조", "보통", "습함"]
+            grp_colors = {"건조": "#d97706", "보통": "#6b7280", "습함": "#2563eb"}
+            g_lo = heat_d.groupby("h_grp")["temp"].quantile(0.02).max()
+            g_hi = heat_d.groupby("h_grp")["temp"].quantile(0.98).min()
+
+            if g_hi - g_lo > 3:
+                tg_h = np.linspace(g_lo, g_hi, 200)
+                figH4 = go.Figure()
+                curves = {}
+                for gname in grp_names:
+                    sub = heat_d[heat_d["h_grp"] == gname]
+                    if len(sub) < 30:
+                        continue
+                    mg, pg, _ = fit_poly3(sub["temp"].values, sub["Q"].values)
+                    curves[gname] = (mg, pg)
+                    figH4.add_trace(go.Scatter(
+                        x=tg_h, y=poly3_predict(mg, pg, tg_h), mode="lines",
+                        name=f"{gname} (n={len(sub)})", line=dict(width=3, color=grp_colors[gname]),
+                        hovertemplate="T=%{x:.1f}℃<br>%{y:,.0f} MJ<extra>" + gname + "</extra>"))
+                figH4.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=13),
+                                    margin=dict(l=40, r=20, t=30, b=40),
+                                    xaxis=dict(title="기온(℃)"), yaxis=dict(title="공급량(MJ)", tickformat=","),
+                                    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+                st.plotly_chart(figH4, use_container_width=True, config={"displaylogo": False})
+
+                if "건조" in curves and "습함" in curves:
+                    rows = []
+                    for tt in [0, 2, 4, 6, 8, 10, 12]:
+                        if not (g_lo <= tt <= g_hi):
+                            continue
+                        row = {"기온(℃)": tt}
+                        for gname in grp_names:
+                            if gname in curves:
+                                row[f"{gname}(MJ)"] = float(poly3_predict(curves[gname][0], curves[gname][1], [tt])[0])
+                        row["습함−건조(MJ)"] = row["습함(MJ)"] - row["건조(MJ)"]
+                        row["차이(%)"] = row["습함−건조(MJ)"] / row["건조(MJ)"] * 100
+                        rows.append(row)
+                    if rows:
+                        tbl = pd.DataFrame(rows).set_index("기온(℃)")
+                        st.dataframe(tbl.style.format("{:,.0f}", subset=[c for c in tbl.columns if c != "차이(%)"])
+                                         .format("{:+.1f}", subset=["차이(%)"]), use_container_width=True)
+                st.caption(f"분류 기준(기준습도 대비): 건조 ≤ {q1:+.1f}%p, 보통 {q1:+.1f}~{q2:+.1f}%p, 습함 > {q2:+.1f}%p. "
+                           "습한 날은 흐림·비 날씨와 겹치므로 습도 자체의 효과와 일사 부족 효과가 섞여 있습니다.")
+            else:
+                st.info("그룹별 곡선을 비교할 공통 기온 범위가 부족합니다.")
+
+            # ── H-5. 계획 대비 실적 vs 습도 ──────────────────
+            if plan_col is not None and heat_d["plan"].notna().sum() >= 20:
+                st.markdown("##### H-5. 계획 대비 실적(실적/계획) vs 습도 이상치")
+                pr = heat_d.dropna(subset=["plan"]).copy()
+                pr = pr[pr["plan"] > 0]
+                pr["ratio"] = pr["Q"] / pr["plan"] * 100.0
+                a_bins = [-100, -10, -3, 3, 10, 100]
+                a_labels = ["−10%p 이하", "−10~−3", "−3~+3", "+3~+10", "+10%p 초과"]
+                pr["a_bin"] = pd.cut(pr["h_anom"], bins=a_bins, labels=a_labels)
+                gp = pr.groupby("a_bin", observed=False)["ratio"].agg(["mean", "median", "count"])
+                gp.columns = ["평균 비율(%)", "중앙값(%)", "일수"]
+                st.dataframe(gp.round(1), use_container_width=True)
+                st.caption("계획값이 있는 기간만 집계합니다. 계획 오차는 예보 기온 오차 등 다른 요인이 크므로 참고용으로 보세요.")
 
 # ============================================================
 # G. 기온분석 — 선택 월 히트맵(일자×연도) (수정됨: 상단 구글시트 데이터 공용사용)
