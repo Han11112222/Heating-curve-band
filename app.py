@@ -574,10 +574,11 @@ else:
             clear_d = dd[dd["dtr"] >= clear_dtr]
             cloudy_d = dd[dd["dtr"] < cloudy_dtr]
             base_tbl = pd.DataFrame({
-                "맑은 날 평균습도(%)": clear_d.groupby("month")["hum"].mean(),
-                "맑은 날 수": clear_d.groupby("month")["hum"].size(),
                 "전체 평균습도(%)": dd.groupby("month")["hum"].mean(),
+                "맑은 날 평균습도(%)": clear_d.groupby("month")["hum"].mean(),
                 "흐림·비 평균습도(%)": cloudy_d.groupby("month")["hum"].mean(),
+                "맑은 날 수": clear_d.groupby("month")["hum"].size(),
+                "흐림·비 일수": cloudy_d.groupby("month")["hum"].size(),
             }).reindex(range(1, 13))
             clear_ok = base_tbl["맑은 날 수"].fillna(0) >= 5
             base_map = base_tbl["맑은 날 평균습도(%)"].where(clear_ok, base_tbl["전체 평균습도(%)"])
@@ -591,19 +592,24 @@ else:
         dd = dd.dropna(subset=["h_anom"])
 
         figH1 = go.Figure()
-        for col_name, color in [("맑은 날 평균습도(%)", "#d97706"),
-                                ("전체 평균습도(%)", "#6b7280"),
-                                ("흐림·비 평균습도(%)", "#2563eb")]:
+        for col_name, color in [("전체 평균습도(%)", "#334E68"),      # 진한 슬레이트 블루
+                                ("맑은 날 평균습도(%)", "#9FB3C8"),    # 연한 회청색
+                                ("흐림·비 평균습도(%)", "#627D98")]:   # 중간 회청색
             if col_name in base_tbl.columns:
                 figH1.add_trace(go.Bar(x=[f"{m}월" for m in base_tbl.index], y=base_tbl[col_name],
                                        name=col_name, marker_color=color))
-        figH1.update_layout(template="simple_white", barmode="group",
+        figH1.update_layout(template="simple_white", barmode="group", bargap=0.22, bargroupgap=0.04,
                             font=dict(family=PLOT_FONT, size=13),
                             margin=dict(l=40, r=20, t=30, b=40),
-                            yaxis=dict(title="평균습도(%)", range=[0, 100]),
+                            yaxis=dict(title="평균습도(%)", range=[0, 100],
+                                       showgrid=True, gridcolor="#E5E9F0", zeroline=False),
                             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
         st.plotly_chart(figH1, use_container_width=True, config={"displaylogo": False})
-        st.dataframe(base_tbl.round(1), use_container_width=True)
+        disp_tbl = base_tbl.round(1)
+        for cnt_col in ["맑은 날 수", "흐림·비 일수"]:
+            if cnt_col in disp_tbl.columns:
+                disp_tbl[cnt_col] = disp_tbl[cnt_col].fillna(0).astype(int)
+        st.dataframe(disp_tbl, use_container_width=True)
         st.caption("맑은 날 수가 5일 미만인 달은 전체 평균습도를 기준으로 대체합니다. "
                    "일교차는 맑음 여부의 대용 지표이므로, 일조시간·전운량이 있으면 그 값으로 바꾸는 편이 더 정확합니다.")
 
@@ -628,7 +634,7 @@ else:
             figH2 = go.Figure(go.Bar(
                 x=gb.index.astype(str), y=gb["mean"],
                 error_y=dict(type="data", array=gb["ci90"].fillna(0).values, visible=True),
-                marker_color=["#d97706" if (v is not None and v < 0) else "#2563eb" for v in gb["mean"]],
+                marker_color=["#9FB3C8" if (v is not None and v < 0) else "#334E68" for v in gb["mean"]],
                 text=[f"n={int(n)}" for n in gb["count"]], textposition="outside",
                 hovertemplate="%{x}<br>평균 잔차=%{y:.2f}%<extra></extra>"
             ))
@@ -674,7 +680,7 @@ else:
             heat_d["h_grp"] = np.where(heat_d["h_anom"] <= q1, "건조",
                                        np.where(heat_d["h_anom"] <= q2, "보통", "습함"))
             grp_names = ["건조", "보통", "습함"]
-            grp_colors = {"건조": "#d97706", "보통": "#6b7280", "습함": "#2563eb"}
+            grp_colors = {"건조": "#9AA5B1", "보통": "#627D98", "습함": "#1F4E79"}
             g_lo = heat_d.groupby("h_grp")["temp"].quantile(0.02).max()
             g_hi = heat_d.groupby("h_grp")["temp"].quantile(0.98).min()
 
