@@ -1011,14 +1011,16 @@ else:
                         figD.add_trace(go.Bar(x=[lab], y=[hi - lo], base=[lo], width=0.38, marker_color=col, marker_line_width=0,
                                               hovertemplate=f"{lab}<br>최저 {lo:.1f}℃ ∼ 최고 {hi:.1f}℃<extra></extra>"))
                         figD.add_trace(go.Scatter(x=[lab], y=[mean], mode="markers", hoverinfo="skip",
-                                                  marker=dict(symbol="diamond", size=11, color="white", line=dict(color=C_TXT, width=1.5))))
+                                                  marker=dict(symbol="line-ew", size=78, line=dict(color="white", width=2.5))))
                         figD.add_annotation(x=lab, y=hi, yshift=18, showarrow=False, text=f"최고 {hi:.1f}℃", font=dict(color=C_TXT, size=12))
                         figD.add_annotation(x=lab, y=lo, yshift=-18, showarrow=False, text=f"최저 {lo:.1f}℃", font=dict(color=C_TXT, size=12))
-                        figD.add_annotation(x=lab, y=(hi + lo) / 2, showarrow=False, text=f"<b>일교차<br>{hi - lo:.1f}℃</b>",
+                        figD.add_annotation(x=lab, y=mean, xshift=58, xanchor="left", showarrow=False,
+                                            text=f"하루 평균 {mean:.1f}℃", font=dict(color=C_TXT, size=12))
+                        figD.add_annotation(x=lab, y=hi - (hi - lo) * 0.17, showarrow=False, text=f"<b>일교차 {hi - lo:.1f}℃</b>",
                                             font=dict(color="white", size=13))
                     figD.update_layout(template="simple_white", showlegend=False, font=dict(family=H_FONT, size=13, color=C_TXT),
                                        margin=dict(l=40, r=10, t=30, b=40),
-                                       yaxis=dict(title="기온(℃) · ◇ 하루 평균", gridcolor=C_GRID,
+                                       yaxis=dict(title="기온(℃)", gridcolor=C_GRID,
                                                   range=[min(sp["d_min"], sp["w_min"]) - 4, max(sp["d_max"], sp["w_max"]) + 4]))
                     st.plotly_chart(figD, use_container_width=True, config={"displaylogo": False})
                 with cR:
@@ -1042,7 +1044,7 @@ else:
                     f"일교차까지 같게 맞추면 <b>{sp['adj']:+.1f}%</b>로 사실상 차이가 없습니다. "
                     "즉, 비 때문에 공급량이 줄어든 것이 아니라 <b>일교차가 작아서</b> 줄어 보이는 것입니다."
                     "</div>", unsafe_allow_html=True)
-                st.caption("◇는 하루 평균기온, 막대는 그날들의 평균 최저∼평균 최고 기온입니다. 일교차 보정은 최고·최저기온 차이를 함께 맞춰 다시 계산한 값입니다. "
+                st.caption("막대는 그날들의 평균 최저∼평균 최고 기온, 막대 안의 흰 선은 하루 평균기온입니다. 일교차 보정은 최고·최저기온 차이를 함께 맞춰 다시 계산한 값입니다. "
                            "원인 해석(아침이 추운 날에 난방이 몰림 등)은 추정이며, 구름양·공휴일 등은 통제하지 못했습니다.")
 
             if match_rows:
