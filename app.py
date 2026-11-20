@@ -741,10 +741,9 @@ else:
         pr = heat_d.dropna(subset=["rain", "snow"]).copy() if has_pr else pd.DataFrame()
         use_pr = len(pr) >= 100
         if use_pr:
-            pr["pgroup"] = np.where(pr["snow"] > 0, "눈",
-                             np.where(pr["rain"] >= RAIN_MM, "비",
-                             np.where(pr["rain"] > 0, "미량", "무강수")))
-            pr["grp"] = pr["pgroup"].where(pr["pgroup"].isin(["눈", "비"]))
+            pr["pgroup"] = np.where((pr["snow"] > 0) | (pr["rain"] >= RAIN_MM), "비·눈",
+                             np.where(pr["rain"] > 0, "미량", "무강수"))
+            pr["grp"] = pr["pgroup"].where(pr["pgroup"] == "비·눈")
             dry_mask = pr["pgroup"] == "무강수"
             pr.loc[dry_mask, "hq"] = pr[dry_mask].groupby("month")["hum"].rank(pct=True, method="first")
             pr.loc[dry_mask & (pr["hq"] <= 1 / 3), "grp"] = "건조"
@@ -754,9 +753,9 @@ else:
             st.info("강수량·적설량이 입력된 난방기 일수가 부족해(시트 L·M열) 비·눈 비교는 생략하고 습도만으로 계산했습니다. "
                     "입력이 끝난 뒤 사이드바의 '🔄 구글 시트 새로고침'을 눌러 주세요.")
 
-        GROUPS = ["건조", "보통", "습함", "비", "눈"]
+        GROUPS = ["건조", "보통", "습함", "비·눈"]
         GROUP_DESC = {"건조": "건조 (비·눈 없음, 습도 하위 1/3)", "보통": "보통 (비·눈 없음, 습도 중간 1/3) ← 기준",
-                      "습함": "습함 (비·눈 없음, 습도 상위 1/3)", "비": f"비 ({RAIN_MM:g}mm 이상)", "눈": "눈 (적설 있음)"}
+                      "습함": "습함 (비·눈 없음, 습도 상위 1/3)", "비·눈": f"비·눈 (강수 {RAIN_MM:g}mm 이상 또는 적설 있음)"}
         SEASON_COLOR = {"동절기 (12~2월)": "#1E3F7A", "간절기·봄 (3~4월)": "#5B93D3", "간절기·가을 (10~11월)": "#A5CBF0"}
 
         def _sig(e, c):
@@ -799,7 +798,7 @@ else:
                 if not rs:
                     continue
                 parts = []
-                for g, label in [("비", "비 온 날"), ("눈", "눈 온 날"), ("습함", "비·눈 없이 습한 날"), ("건조", "건조한 날")]:
+                for g, label in [("비·눈", "비·눈 온 날"), ("습함", "비·눈 없이 습한 날"), ("건조", "건조한 날")]:
                     r = rs.get(g)
                     if r is None or not np.isfinite(r["eff"]):
                         continue
@@ -845,7 +844,7 @@ else:
 
         # ── ② 계절별 요약: 습도가 높은 날은 어떤 날인가 + 습도 +10%p당 영향 ─────────
         st.markdown("##### 2) 계절별 요약 — 습도가 10%p 높을 때 공급량 변화")
-        sum_rows = []
+        sum_rows, sum_eff = [], []
         for sname, months in HUM_SEASONS:
             s_heat = heat_d[heat_d["month"].isin(months)]
             row = {"계절": sname, "난방기 일수": len(s_heat)}
@@ -876,10 +875,28 @@ else:
             row["90% 신뢰구간(%)"] = "-" if not np.isfinite(eff) else f"{eff - ci:+.2f} ~ {eff + ci:+.2f}"
             row["판정"] = "유의미" if _sig(eff, ci) else ("확인 안 됨" if np.isfinite(eff) else "표본 부족")
             sum_rows.append(row)
+            sum_eff.append(dict(season=sname, eff=eff, ci=ci))
         st.dataframe(pd.DataFrame(sum_rows).set_index("계절"), use_container_width=True)
         st.caption("습도 +10%p는 '같은 달 평균보다 습도가 10%p 높은 날'을 뜻합니다. 비·눈이 있었던 날을 빼고(강수 자료가 있을 때) "
                    "기온이 같은 월~금끼리 비교했기 때문에, 비·눈 효과가 섞이지 않은 습도 차이만 남습니다. "
                    "'유의미'는 90% 신뢰구간이 0을 포함하지 않는다는 뜻이며 차이가 크다는 뜻은 아닙니다.")
+
+        ok_rows = [r for r in sum_eff if np.isfinite(r["eff"])]
+        if ok_rows:
+            fig_s = go.Figure(go.Bar(
+                x=[r["season"] for r in ok_rows], y=[r["eff"] for r in ok_rows],
+                error_y=dict(type="data", array=[r["ci"] for r in ok_rows], visible=True, color="#7F9CC0"),
+                marker_color=["#2B5FA8" if _sig(r["eff"], r["ci"]) else "#A5CBF0" for r in ok_rows],
+                text=[f"{r['eff']:+.2f}%" for r in ok_rows], textposition="outside",
+                hovertemplate="%{x}<br>습도 +10%p당 %{y:+.2f}%<extra></extra>"))
+            fig_s.add_hline(y=0, line_dash="dash", line_color="#7F9CC0")
+            fig_s.update_layout(template="simple_white", bargap=0.5, font=dict(family=H_FONT, size=13),
+                                margin=dict(l=40, r=20, t=30, b=40),
+                                yaxis=dict(title="습도 +10%p당 공급량 변화(%)", showgrid=True,
+                                           gridcolor="#E6EEF8", zeroline=False))
+            st.plotly_chart(fig_s, use_container_width=True, config={"displaylogo": False})
+            st.caption("진한 파랑 = 통계적으로 유의미, 연한 파랑 = 확인 안 됨(신뢰구간이 0을 포함). 막대 위 선은 90% 신뢰구간입니다. "
+                       + ("비·눈이 전혀 없던 날끼리 비교한 값입니다." if use_pr else "강수 자료가 없어 전체 난방기 기준입니다."))
 
         # ── ③ 참고 자료 ───────────────────────────────────────
         with st.expander("연도별 사용 일수 확인 (습도·강수 데이터가 어느 해부터 쓰였는지)"):
