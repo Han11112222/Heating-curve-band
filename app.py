@@ -608,13 +608,25 @@ else:
             s_all = dd[dd["month"].isin(months)]
             s_heat = heat_d[heat_d["month"].isin(months)]
             r = dict(season=sname, n_heat=len(s_heat), hum_all=float(s_all["hum"].mean()) if len(s_all) else np.nan,
-                     hum_clear=np.nan, hum_cloudy=np.nan, dtr_thr=np.nan, eff=np.nan, ci=np.nan, mj=np.nan)
+                     hum_clear=np.nan, hum_cloudy=np.nan, dtr_thr=np.nan, eff=np.nan, ci=np.nan, mj=np.nan,
+                     hum_dry=np.nan, hum_wet=np.nan, wet_share=np.nan, n_dry=0, n_wet=0)
             # 맑은 날 = 그 계절에서 일교차가 큰 상위 1/3, 흐림·비 = 하위 1/3
             if has_dtr and s_all["dtr"].notna().sum() >= 60:
                 hi_thr, lo_thr = s_all["dtr"].quantile([2 / 3, 1 / 3]).values
                 r["hum_clear"] = float(s_all.loc[s_all["dtr"] >= hi_thr, "hum"].mean())
                 r["hum_cloudy"] = float(s_all.loc[s_all["dtr"] <= lo_thr, "hum"].mean())
                 r["dtr_thr"] = float(hi_thr)
+            # 비·눈 실측 기준: 비·눈이 온 날(강수 1mm 이상 또는 적설 있음) vs 하나도 안 온 날의 평균습도
+            if rain_col and snow_col:
+                s_p = s_all.dropna(subset=["rain", "snow"])
+                if len(s_p) >= 60:
+                    wet_m = (s_p["snow"] > 0) | (s_p["rain"] >= 1.0)
+                    dry_m = (s_p["snow"] <= 0) & (s_p["rain"] <= 0)
+                    if int(wet_m.sum()) >= 10 and int(dry_m.sum()) >= 10:
+                        r["hum_wet"] = float(s_p.loc[wet_m, "hum"].mean())
+                        r["hum_dry"] = float(s_p.loc[dry_m, "hum"].mean())
+                        r["wet_share"] = float(wet_m.mean() * 100.0)
+                        r["n_wet"], r["n_dry"] = int(wet_m.sum()), int(dry_m.sum())
             # 습도 +10%p당 공급량 변화 (기온·주말 통제, 난방기만)
             if len(s_heat) >= 60:
                 Xr = np.column_stack([np.ones(len(s_heat)), s_heat["temp"].values,
@@ -627,14 +639,23 @@ else:
         def _sig(r):
             return np.isfinite(r["eff"]) and ((r["eff"] - r["ci"] > 0) or (r["eff"] + r["ci"] < 0))
 
+        def _real_ok(r):
+            return np.isfinite(r["hum_dry"]) and np.isfinite(r["hum_wet"])
+
+        USE_REAL = any(_real_ok(r) for r in res_rows)   # 강수·적설 실측이 있으면 그것을 기준으로 사용
+
         def _proxy_ok(r):
             return np.isfinite(r["hum_clear"]) and np.isfinite(r["hum_cloudy"]) and (r["hum_cloudy"] - r["hum_clear"] >= 5)
 
         # ── 핵심 문장: 동절기 ───────────────────────────────
         w = res_rows[0]
         if np.isfinite(w["eff"]):
-            base_txt = (f"맑은 날 기준 평균습도는 약 {w['hum_clear']:.0f}%" if _proxy_ok(w)
-                        else f"평균습도(기준)는 약 {w['hum_all']:.0f}%")
+            if _real_ok(w):
+                base_txt = f"비·눈이 안 온 날 평균습도는 약 {w['hum_dry']:.0f}%(비·눈 온 날은 약 {w['hum_wet']:.0f}%)"
+            elif _proxy_ok(w):
+                base_txt = f"맑은 날 기준 평균습도는 약 {w['hum_clear']:.0f}%"
+            else:
+                base_txt = f"평균습도(기준)는 약 {w['hum_all']:.0f}%"
             if _sig(w):
                 direction = "많아집니다" if w["eff"] > 0 else "적어집니다"
                 st.success(f"**동절기(12~2월)** {base_txt}이고, 습도가 10%p 높아지면 공급량이 약 "
@@ -642,7 +663,7 @@ else:
             else:
                 st.info(f"**동절기(12~2월)** {base_txt}입니다. 습도가 높아질 때 공급량이 변하는지는 통계적으로 확인되지 않았습니다"
                         f"(추정 {w['eff']:+.2f}%/10%p, 90% 신뢰구간 {w['eff'] - w['ci']:+.2f} ~ {w['eff'] + w['ci']:+.2f}%).")
-            if np.isfinite(w["hum_clear"]) and not _proxy_ok(w):
+            if (not _real_ok(w)) and np.isfinite(w["hum_clear"]) and not _proxy_ok(w):
                 st.warning(f"동절기는 일교차로 맑은 날을 구분하기 어렵습니다(흐림·비 평균습도 − 맑은 날 평균습도 = "
                            f"{w['hum_cloudy'] - w['hum_clear']:.1f}%p). 그래서 맑은 날 대신 동절기 평균습도를 기준으로 표시했습니다. "
                            "습도 +10%p당 영향은 맑은 날 정의와 무관하게 계산되므로 그대로 유효합니다.")
@@ -655,22 +676,28 @@ else:
 
         tbl_rows = []
         for r in res_rows:
-            tbl_rows.append({
-                "계절": r["season"],
-                "난방기 일수": r["n_heat"],
-                "맑은 날 평균습도(%)": _fmt(r["hum_clear"], ".1f") + ("" if (_proxy_ok(r) or not np.isfinite(r["hum_clear"])) else " ※"),
-                "전체 평균습도(%)": _fmt(r["hum_all"], ".1f"),
-                "흐림·비 평균습도(%)": _fmt(r["hum_cloudy"], ".1f") + ("" if (_proxy_ok(r) or not np.isfinite(r["hum_cloudy"])) else " ※"),
-                "습도 +10%p → 공급량(%)": _fmt(r["eff"], "+.2f"),
-                "90% 신뢰구간(%)": "-" if not np.isfinite(r["eff"]) else f"{r['eff'] - r['ci']:+.2f} ~ {r['eff'] + r['ci']:+.2f}",
-                "일 환산(MJ/일)": _fmt(r["mj"], "+,.0f"),
-                "판정": "유의" if _sig(r) else ("확인 안 됨" if np.isfinite(r["eff"]) else "표본 부족"),
-            })
+            row = {"계절": r["season"], "난방기 일수": r["n_heat"]}
+            if USE_REAL:
+                row["비·눈 안 온 날 평균습도(%)"] = _fmt(r["hum_dry"], ".1f")
+                row["전체 평균습도(%)"] = _fmt(r["hum_all"], ".1f")
+                row["비·눈 온 날 평균습도(%)"] = _fmt(r["hum_wet"], ".1f")
+                row["비·눈 온 날 비율(%)"] = _fmt(r["wet_share"], ".0f")
+            else:
+                row["맑은 날 평균습도(%)"] = _fmt(r["hum_clear"], ".1f") + ("" if (_proxy_ok(r) or not np.isfinite(r["hum_clear"])) else " ※")
+                row["전체 평균습도(%)"] = _fmt(r["hum_all"], ".1f")
+                row["흐림·비 평균습도(%)"] = _fmt(r["hum_cloudy"], ".1f") + ("" if (_proxy_ok(r) or not np.isfinite(r["hum_cloudy"])) else " ※")
+            row["습도 +10%p → 공급량(%)"] = _fmt(r["eff"], "+.2f")
+            row["90% 신뢰구간(%)"] = "-" if not np.isfinite(r["eff"]) else f"{r['eff'] - r['ci']:+.2f} ~ {r['eff'] + r['ci']:+.2f}"
+            row["일 환산(MJ/일)"] = _fmt(r["mj"], "+,.0f")
+            row["판정"] = "유의" if _sig(r) else ("확인 안 됨" if np.isfinite(r["eff"]) else "표본 부족")
+            tbl_rows.append(row)
         st.dataframe(pd.DataFrame(tbl_rows).set_index("계절"), use_container_width=True)
         st.caption(f"방법: 난방기(평균기온 {theta_h:.1f}℃ 미만)만 사용 → 기온 효과는 Poly-3로 제거하고 연도별 공급 수준 차이도 보정 → 남은 공급량 차이를 "
                    "'같은 달 평균보다 습도가 10%p 높은 날'로 비교(기온·주말 통제). "
-                   "맑은 날은 그 계절에서 일교차가 큰 상위 1/3인 날, 흐림·비는 하위 1/3인 날입니다. "
-                   "※ 표시는 맑은 날과 흐림·비의 평균습도 차이가 5%p 미만이라 구분이 어려운 계절입니다(이 경우 기준 습도는 계절 평균습도 사용).")
+                   + ("'비·눈 온 날'은 강수량 1mm 이상이거나 적설이 있는 날, '비·눈 안 온 날'은 둘 다 0인 날입니다(시트의 강수·적설 실측 사용, 입력된 날만 집계)."
+                      if USE_REAL else
+                      "맑은 날은 그 계절에서 일교차가 큰 상위 1/3인 날, 흐림·비는 하위 1/3인 날입니다(일교차로 추정한 값). "
+                      "※ 표시는 두 평균습도 차이가 5%p 미만이라 구분이 어려운 계절입니다(이 경우 기준 습도는 계절 평균습도 사용)."))
 
         # ── 그래프: 계절별 습도 +10%p 효과 ─────────────────────
         ok_rows = [r for r in res_rows if np.isfinite(r["eff"])]
@@ -694,7 +721,7 @@ else:
         for r in res_rows:
             if np.isfinite(r["eff"]):
                 row = {"계절": r["season"],
-                       "기준 습도(%)": _fmt(r["hum_clear"] if _proxy_ok(r) else r["hum_all"], ".0f")}
+                       "기준 습도(%)": _fmt(r["hum_dry"] if _real_ok(r) else (r["hum_clear"] if _proxy_ok(r) else r["hum_all"]), ".0f")}
                 for dh in [-20, -10, 10, 20]:
                     row[f"{dh:+d}%p"] = f"{r['eff'] * dh / 10.0:+.2f}%"
                 sens.append(row)
