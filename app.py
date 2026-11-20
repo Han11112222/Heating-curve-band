@@ -950,7 +950,7 @@ else:
                 _ix = SHOW.index("비·눈")
                 _bw = (1.0 - 0.3) / 3.0                            # 막대 1개 폭(bargap 0.3, 3개 그룹)
                 _cx = _ix - _bw                                    # 동절기 막대 중심
-                fig_h2.add_vrect(x0=_cx - _bw / 2 - 0.02, x1=_cx + _bw / 2 + 0.02, fillcolor="#9AA5B1", opacity=0.20,
+                fig_h2.add_vrect(x0=_cx - _bw / 2 - 0.02, x1=_cx + _bw / 2 + 0.02, fillcolor="#8793A1", opacity=0.32,
                                  layer="below", line_width=0)
                 fig_h2.add_annotation(x=_ix - _bw, xref="x", y=1.0, yref="paper", yanchor="bottom", showarrow=False,
                                       text="<b>핵심: 동절기 비·눈</b>", font=dict(color="#4A5663", size=12))
