@@ -942,9 +942,16 @@ else:
                     name=sname, x=[r["grp"] for r in rr], y=[r["eff"] for r in rr],
                     error_y=dict(type="data", array=[r["ci"] for r in rr], visible=True, color=C_ERR, thickness=1.5, width=5),
                     marker_color=SEASON_COLOR[sname], marker_line_width=0,
-                    text=[f"{r['eff']:+.1f}%" for r in rr], textposition="outside", textfont=dict(color=C_TXT),
                     customdata=[[r["n"]] for r in rr],
                     hovertemplate=sname + "<br>%{x}: %{y:+.2f}% (n=%{customdata[0]}일)<extra></extra>"))
+                # 숫자는 오차선 바깥(위·아래 끝)에 따로 표시해 선과 겹치지 않게 함
+                _k = [n_ for n_, (sn_, _m) in enumerate(HUM_SEASONS) if sn_ == sname][0]
+                for r in rr:
+                    _xc = SHOW.index(r["grp"]) + (_k - (len(HUM_SEASONS) - 1) / 2.0) * ((1.0 - 0.3) / len(HUM_SEASONS))
+                    _up = r["eff"] >= 0
+                    fig_h2.add_annotation(x=_xc, xref="x", y=(r["eff"] + r["ci"]) if _up else (r["eff"] - r["ci"]), yref="y",
+                                          yshift=12 if _up else -12, showarrow=False, text=f"<b>{r['eff']:+.1f}%</b>",
+                                          font=dict(color=C_TXT, size=13))
             fig_h2.add_hline(y=0, line_dash="dash", line_color=C_ERR)
             if "비·눈" in SHOW and any(r["season"].startswith("동절기") and r["grp"] == "비·눈" and np.isfinite(r["eff"]) for r in eff_rows):
                 _ix = SHOW.index("비·눈")
