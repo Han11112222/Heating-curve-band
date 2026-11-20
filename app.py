@@ -978,6 +978,107 @@ else:
                            f"{RAIN_MM:g}mm 이상(눈 없음)인 날이며, 그보다 적게 온 날(미량)은 비교에서 제외했습니다. 표본이 8일 미만인 구분은 표시하지 않습니다. "
                            "이 결과는 과거 실적 해석용이며 예측에는 사용하지 않습니다.")
 
+        # ============================================================
+        # H-3. 조건을 맞췄을 때 습도 차이의 순수 영향 (요일·기온·일교차·비/눈 통제)
+        # ============================================================
+        st.markdown("---")
+        st.markdown("#### ⚖️ H-3. 조건을 맞췄을 때 습도 차이의 영향 — 요일·기온·일교차·비/눈이 비슷한 날끼리 비교")
+
+        base3 = heat_d.dropna(subset=["dtr"]).copy()
+        has_pr3 = bool(rain_col) and bool(snow_col)
+        pr3 = base3.dropna(subset=["rain", "snow"]).copy() if has_pr3 else pd.DataFrame()
+        if len(pr3):
+            pr3["pday"] = ((pr3["snow"] > 0) | (pr3["rain"] >= 1.0)).astype(float)   # 비·눈 온 날
+            pr3["dry"] = (pr3["snow"] <= 0) & (pr3["rain"] <= 0)                      # 비·눈 전혀 없는 날
+
+        def _model3(sub, use_dtr, use_pday):
+            cols_ = [np.ones(len(sub)), sub["temp"].values, sub["temp"].values ** 2, sub["weekend"].values]
+            if use_dtr:
+                cols_.append(sub["dtr"].values)
+            if use_pday:
+                cols_.append(sub["pday"].values)
+            cols_.append(sub["hum_rel"].values / 10.0)           # 같은 달 평균 대비 습도 +10%p
+            b3, se3 = ols_fit(np.column_stack(cols_), sub["res_pct"].values)
+            return float(b3[-1]), 1.645 * float(se3[-1])
+
+        MODELS3 = [("A", "기온·요일만 맞춤"),
+                   ("B", "A + 일교차(밤·새벽 기온 차이)"),
+                   ("C", "B + 비·눈 온 날 여부"),
+                   ("D", "B + 비·눈이 전혀 없던 날만 비교")]
+        M3_COLOR = {"A": "#A5CBF0", "B": "#5B93D3", "C": "#2B5FA8", "D": "#1E3F7A"}
+
+        rows3 = []
+        for sname, months in HUM_SEASONS:
+            sb = base3[base3["month"].isin(months)]
+            sp = pr3[pr3["month"].isin(months)] if len(pr3) else pr3
+            if len(sb) >= 60:
+                e, c = _model3(sb, False, False); rows3.append(dict(season=sname, m="A", eff=e, ci=c, n=len(sb)))
+                e, c = _model3(sb, True, False);  rows3.append(dict(season=sname, m="B", eff=e, ci=c, n=len(sb)))
+            if len(sp) >= 60:
+                e, c = _model3(sp, True, True);   rows3.append(dict(season=sname, m="C", eff=e, ci=c, n=len(sp)))
+                spd = sp[sp["dry"]]
+                if len(spd) >= 50:
+                    e, c = _model3(spd, True, False); rows3.append(dict(season=sname, m="D", eff=e, ci=c, n=len(spd)))
+
+        def _sig3(r):
+            return (r["eff"] - r["ci"] > 0) or (r["eff"] + r["ci"] < 0)
+
+        if not rows3:
+            st.info("조건을 맞춰 비교할 표본이 아직 부족합니다(일교차·강수 자료 입력 후 새로고침해 주세요).")
+        else:
+            # 핵심 문장: 가장 많이 맞춘 모델(D → C → B 순)
+            st.markdown("**한눈에 보기** (조건을 가장 많이 맞춘 결과, 습도 +10%p당 공급량 변화)")
+            for sname, _ in HUM_SEASONS:
+                rs = {r["m"]: r for r in rows3 if r["season"] == sname}
+                if not rs:
+                    continue
+                key = "D" if "D" in rs else ("C" if "C" in rs else "B")
+                r = rs[key]
+                cond = {"D": "요일·기온·일교차가 같고 비·눈이 없던 날끼리", "C": "요일·기온·일교차·비/눈 여부가 같은 날끼리",
+                        "B": "요일·기온·일교차가 같은 날끼리"}[key]
+                if _sig3(r):
+                    st.markdown(f"- **{sname}**: {cond} 비교하면 습도가 10%p 높을 때 공급량이 **{r['eff']:+.2f}%** "
+                                f"(90% 신뢰구간 {r['eff'] - r['ci']:+.2f} ~ {r['eff'] + r['ci']:+.2f}%)")
+                else:
+                    st.markdown(f"- **{sname}**: {cond} 비교하면 습도 차이에 따른 뚜렷한 공급량 변화는 **확인되지 않았습니다** "
+                                f"({r['eff']:+.2f}%, 90% 신뢰구간 {r['eff'] - r['ci']:+.2f} ~ {r['eff'] + r['ci']:+.2f}%)")
+
+            # 표: 조건을 늘려 갈 때 값이 어떻게 변하는지
+            lab = dict(MODELS3)
+            t3 = []
+            for sname, _ in HUM_SEASONS:
+                for r in [x for x in rows3 if x["season"] == sname]:
+                    t3.append({"계절": sname, "맞춘 조건": f"{r['m']}. {lab[r['m']]}", "일수": r["n"],
+                               "습도 +10%p → 공급량(%)": f"{r['eff']:+.2f}",
+                               "90% 신뢰구간(%)": f"{r['eff'] - r['ci']:+.2f} ~ {r['eff'] + r['ci']:+.2f}",
+                               "판정": "유의" if _sig3(r) else "확인 안 됨"})
+            st.dataframe(pd.DataFrame(t3).set_index(["계절", "맞춘 조건"]), use_container_width=True)
+
+            # 그래프
+            fig3 = go.Figure()
+            for mk, ml in MODELS3:
+                rr = [r for r in rows3 if r["m"] == mk]
+                if not rr:
+                    continue
+                fig3.add_trace(go.Bar(
+                    name=f"{mk}. {ml}", x=[r["season"] for r in rr], y=[r["eff"] for r in rr],
+                    error_y=dict(type="data", array=[r["ci"] for r in rr], visible=True, color="#7F9CC0"),
+                    marker_color=M3_COLOR[mk], text=[f"{r['eff']:+.2f}%" for r in rr], textposition="outside",
+                    customdata=[[r["n"]] for r in rr],
+                    hovertemplate="%{x}<br>" + f"{mk}. {ml}" + ": %{y:+.2f}% (n=%{customdata[0]}일)<extra></extra>"))
+            fig3.add_hline(y=0, line_dash="dash", line_color="#7F9CC0")
+            fig3.update_layout(template="simple_white", barmode="group", bargap=0.25, font=dict(family=PLOT_FONT, size=13),
+                               margin=dict(l=40, r=20, t=30, b=40), legend=dict(orientation="h", y=1.15),
+                               xaxis=dict(categoryorder="array", categoryarray=[x[0] for x in HUM_SEASONS]),
+                               yaxis=dict(title="습도 +10%p당 공급량 변화(%)", showgrid=True, gridcolor="#E6EEF8", zeroline=False))
+            st.plotly_chart(fig3, use_container_width=True, config={"displaylogo": False})
+            st.caption("읽는 법: A에서 D로 갈수록 비교 조건이 엄격해집니다. 값이 A→D로 가며 0에 가까워지면 '습도 자체'가 아니라 "
+                       "일교차나 비·눈 같은 날씨 유형 때문에 생긴 차이였다는 뜻이고, D에서도 값이 남으면 그만큼이 습도 차이와 함께 움직이는 영향입니다. "
+                       "막대 위 선은 90% 신뢰구간이며 0을 포함하면 차이가 확인되지 않은 것입니다.")
+            st.caption("방법: 난방기만 사용 · 기온 효과는 Poly-3로 제거하고 연도별 공급 수준을 보정한 뒤 남은 차이(%)를 회귀로 비교. "
+                       "모든 모델에 기온·기온²·주말 여부를 넣었고(요일 효과), 습도는 '같은 달 평균 대비 +10%p'로 사용했습니다. "
+                       "공휴일·구름양은 통제하지 못했으므로, 남은 값에는 이들의 영향이 일부 섞일 수 있습니다. 과거 실적 해석용이며 예측에는 사용하지 않습니다.")
+
 # ============================================================
 # G. 기온분석 — 선택 월 히트맵(일자×연도) (수정됨: 상단 구글시트 데이터 공용사용)
 # ============================================================
