@@ -948,11 +948,12 @@ else:
             fig_h2.add_hline(y=0, line_dash="dash", line_color=C_ERR)
             if "비·눈" in SHOW and any(r["season"].startswith("동절기") and r["grp"] == "비·눈" and np.isfinite(r["eff"]) for r in eff_rows):
                 _ix = SHOW.index("비·눈")
-                _bw = 1.0 / (1.0 + 0.3) / 3.0                      # 막대 1개 폭(bargap 0.3, 3개 그룹)
-                fig_h2.add_vrect(x0=_ix - 1.5 * _bw - 0.03, x1=_ix - 0.5 * _bw + 0.03, fillcolor="#FFE9A8", opacity=0.55,
+                _bw = (1.0 - 0.3) / 3.0                            # 막대 1개 폭(bargap 0.3, 3개 그룹)
+                _cx = _ix - _bw                                    # 동절기 막대 중심
+                fig_h2.add_vrect(x0=_cx - _bw / 2 - 0.02, x1=_cx + _bw / 2 + 0.02, fillcolor="#9AA5B1", opacity=0.20,
                                  layer="below", line_width=0)
                 fig_h2.add_annotation(x=_ix - _bw, xref="x", y=1.0, yref="paper", yanchor="bottom", showarrow=False,
-                                      text="<b>핵심: 동절기 비·눈</b>", font=dict(color="#8A6A00", size=12))
+                                      text="<b>핵심: 동절기 비·눈</b>", font=dict(color="#4A5663", size=12))
             fig_h2.update_layout(template="simple_white", barmode="group", bargap=0.3, font=dict(family=H_FONT, size=13, color=C_TXT),
                                  margin=dict(l=40, r=20, t=30, b=40), legend=dict(orientation="h", y=1.1),
                                  xaxis=dict(categoryorder="array", categoryarray=SHOW),
@@ -1048,8 +1049,6 @@ else:
                     "border-left:4px solid #16427A; background:#F3F8FD; border-radius:6px; color:#1F3A5C'>"
                     f"봄에 비가 오면 낮 기온이 덜 오르고 밤 기온은 덜 내려가 <b>일교차가 {sp['w_max'] - sp['w_min']:.1f}℃</b>로, 맑은 날({sp['d_max'] - sp['d_min']:.1f}℃)의 약 절반입니다.<br>"
                     "하루 평균기온이 비슷해도 일교차가 작은 날은 공급량이 낮게 나오는 경향이 있습니다.<br>"
-                    f"그래서 같은 평균기온끼리만 비교하면 비 오는 날의 공급량이 <b>{sp['raw']:+.1f}%</b>로 낮게 보입니다.<br>"
-                    f"일교차까지 같게 맞추면 <b>{sp['adj']:+.1f}%</b>로 사실상 차이가 없습니다.<br>"
                     "즉, 비 때문에 줄어든 것이 아니라 <b>일교차가 작아서</b> 줄어 보이는 것입니다."
                     "</div>", unsafe_allow_html=True)
                 st.caption("막대는 그날들의 평균 최저∼평균 최고 기온, 막대를 가로지르는 검은 선은 하루 평균기온입니다.  \n"
