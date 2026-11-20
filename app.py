@@ -1006,15 +1006,15 @@ else:
                 cL, cR = st.columns([1.1, 1])
                 with cL:
                     figD = go.Figure()
-                    for lab, lo, hi, mean, col in [("비·눈 없는 날", sp["d_min"], sp["d_max"], sp["d_mean"], C_SKY),
-                                                    ("비·눈 온 날", sp["w_min"], sp["w_max"], sp["w_mean"], C_NAVY)]:
+                    for i_, (lab, lo, hi, mean, col) in enumerate([("비·눈 없는 날", sp["d_min"], sp["d_max"], sp["d_mean"], C_SKY),
+                                                    ("비·눈 온 날", sp["w_min"], sp["w_max"], sp["w_mean"], C_NAVY)]):
                         figD.add_trace(go.Bar(x=[lab], y=[hi - lo], base=[lo], width=0.38, marker_color=col, marker_line_width=0,
                                               hovertemplate=f"{lab}<br>최저 {lo:.1f}℃ ∼ 최고 {hi:.1f}℃<extra></extra>"))
-                        figD.add_trace(go.Scatter(x=[lab], y=[mean], mode="markers", hoverinfo="skip",
-                                                  marker=dict(symbol="line-ew", size=78, line=dict(color="white", width=2.5))))
+                        figD.add_shape(type="line", x0=i_ - 0.27, x1=i_ + 0.27, y0=mean, y1=mean, xref="x", yref="y",
+                                       line=dict(color="black", width=3))
                         figD.add_annotation(x=lab, y=hi, yshift=18, showarrow=False, text=f"최고 {hi:.1f}℃", font=dict(color=C_TXT, size=12))
                         figD.add_annotation(x=lab, y=lo, yshift=-18, showarrow=False, text=f"최저 {lo:.1f}℃", font=dict(color=C_TXT, size=12))
-                        figD.add_annotation(x=lab, y=mean, xshift=58, xanchor="left", showarrow=False,
+                        figD.add_annotation(x=i_ + 0.29, y=mean, xanchor="left", showarrow=False,
                                             text=f"하루 평균 {mean:.1f}℃", font=dict(color=C_TXT, size=12))
                         figD.add_annotation(x=lab, y=hi - (hi - lo) * 0.17, showarrow=False, text=f"<b>일교차 {hi - lo:.1f}℃</b>",
                                             font=dict(color="white", size=13))
@@ -1044,7 +1044,7 @@ else:
                     f"일교차까지 같게 맞추면 <b>{sp['adj']:+.1f}%</b>로 사실상 차이가 없습니다.<br>"
                     "즉, 비 때문에 줄어든 것이 아니라 <b>일교차가 작아서</b> 줄어 보이는 것입니다."
                     "</div>", unsafe_allow_html=True)
-                st.caption("막대는 그날들의 평균 최저∼평균 최고 기온, 막대 안의 흰 선은 하루 평균기온입니다.  \n"
+                st.caption("막대는 그날들의 평균 최저∼평균 최고 기온, 막대를 가로지르는 검은 선은 하루 평균기온입니다.  \n"
                            "일교차 보정은 최고·최저기온 차이를 함께 맞춰 다시 계산한 값입니다.  \n"
                            "원인 해석(아침이 추운 날에 난방이 몰림 등)은 추정이며, 구름양·공휴일 등은 통제하지 못했습니다.")
 
