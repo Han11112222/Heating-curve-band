@@ -1,568 +1,1078 @@
-const STN = '143';       // 대구
-const STN_NAME = '대구';
-const BASE = 'https://apihub.kma.go.kr/api/typ01/url/';
+# app.py — HeatBand Insight (요약 UI + 동적 그래프 + XLSX Export)
+# 단위: 공급량 Q(MJ), 민감도/증가량 Δ1°C(MJ/℃ = −dQ/dT)
 
-// 단건 요청 (접속 실패 시 3회 재시도)
-function fetchText_(url) {
-  let lastErr;
-  for (let a = 0; a < 3; a++) {
-    try {
-      return UrlFetchApp.fetch(url, { muteHttpExceptions: true }).getContentText('EUC-KR');
-    } catch (e) {
-      lastErr = e;
-      Utilities.sleep(2000 * (a + 1));
-    }
-  }
-  throw lastErr;
-}
+import os, io
+from typing import Tuple
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+import matplotlib.font_manager as fm
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import LinearRegression
+import streamlit as st
 
-// 여러 건 요청 (실패하면 재시도 → 한 건씩 → 끝내 실패한 건은 null)
-function fetchAllSafe_(reqs) {
-  for (let a = 0; a < 3; a++) {
-    try {
-      return UrlFetchApp.fetchAll(reqs);
-    } catch (e) {
-      Utilities.sleep(2000 * (a + 1));
-    }
-  }
-  return reqs.map(function (rq) {
-    for (let a = 0; a < 2; a++) {
-      try {
-        return UrlFetchApp.fetch(rq.url, { muteHttpExceptions: true });
-      } catch (e) {
-        Utilities.sleep(1500);
-      }
-    }
-    return null;
-  });
-}
+st.set_page_config(page_title="HeatBand Insight", layout="wide")
 
-// 결측 처리: 기온은 -99 이하만 결측(영하 9℃ 이하는 정상값), 습도는 음수면 결측
-function tempVal_(s) { const v = parseFloat(s); return (isNaN(v) || v <= -99) ? '' : v; }
-function humVal_(s)  { const v = parseFloat(s); return (isNaN(v) || v < 0) ? '' : v; }
-// 강수량·적설: 숫자면 그대로, 음수(-9 등 '현상 없음' 표시)는 0, 빈 값/숫자 아님은 '' (미입력)
-function precipVal_(s) { const v = parseFloat(s); if (isNaN(v)) return ''; return v < 0 ? 0 : v; }
-function pickCol_(colIndex, names) {
-  for (let i = 0; i < names.length; i++) {
-    if (colIndex[names[i]] !== undefined) return colIndex[names[i]];
-  }
-  return undefined;
-}
+# ── Korean font (optional) ───────────────────────────────────
+FONT_PATH = "NanumGothic-Regular.ttf"
+if os.path.exists(FONT_PATH):
+    try:
+        fm.fontManager.addfont(FONT_PATH)
+    except Exception:
+        pass
+PLOT_FONT = "NanumGothic, Arial, Noto Sans KR, sans-serif"
 
-function addDays_(ymd, n) {
-  const dt = new Date(Date.UTC(+ymd.slice(0, 4), +ymd.slice(4, 6) - 1, +ymd.slice(6, 8) + n));
-  return Utilities.formatDate(dt, 'UTC', 'yyyyMMdd');
-}
+st.title("🔥 HeatBand Insight — 난방구간·민감도 분석")
 
-// ---------- 일자료 해석: [평균기온, 최저, 최고, 평균습도, 강수량(mm), 적설량(cm)] ----------
-function parseDailyText_(text) {
-  const colIndex = {};
-  let row = null;
-  text.split('\n').forEach(function (line) {
-    const t = line.trim();
-    if (!t) return;
-    if (t.startsWith('#')) {
-      const m = t.match(/^#\s*(\d+)\.\s*([A-Za-z0-9_]+)\s*:/);
-      if (m) colIndex[m[2]] = Number(m[1]) - 1;
-      return;
-    }
-    const p = t.split(/[\s,]+/);
-    if (p[1] === STN) row = p;
-  });
-  if (!row || colIndex['TA_AVG'] === undefined) return null;
-  if (colIndex['HM_AVG'] === undefined) {
-    throw new Error('HM_AVG 항목을 찾지 못했습니다. 응답 항목: ' + Object.keys(colIndex).join(', '));
-  }
-  const rnIdx = pickCol_(colIndex, ['RN_DAY', 'RN']);       // 일 강수량(mm)
-  const sdIdx = pickCol_(colIndex, ['SD_NEW', 'SD_DAY']);   // 일 최심신적설(cm) = 그날 새로 쌓인 눈
-  if (rnIdx === undefined || sdIdx === undefined) {
-    throw new Error('강수량(RN_DAY) 또는 신적설(SD_NEW) 항목을 찾지 못했습니다. 응답 항목: ' + Object.keys(colIndex).join(', '));
-  }
-  return [
-    tempVal_(row[colIndex['TA_AVG']]),
-    tempVal_(row[colIndex['TA_MIN']]),
-    tempVal_(row[colIndex['TA_MAX']]),
-    humVal_(row[colIndex['HM_AVG']]),
-    precipVal_(row[rnIdx]),
-    precipVal_(row[sdIdx])
-  ];
-}
+# ── Utils ───────────────────────────────────────────────────
+def to_num(x):
+    if isinstance(x, str):
+        x = x.replace(",", "")
+    return pd.to_numeric(x, errors="coerce")
 
-function getDaily_(ymd) {
-  const KEY = PropertiesService.getScriptProperties().getProperty('KMA_KEY');
-  const text = fetchText_(BASE + 'kma_sfcdd.php?tm=' + ymd + '&stn=' + STN
-                          + '&disp=1&help=1&authKey=' + KEY);
-  const v = parseDailyText_(text);
-  if (!v) throw new Error('일자료가 아직 없습니다. 응답 끝부분: ' + text.slice(-500));
-  return v;
-}
+def fit_poly3(x: np.ndarray, y: np.ndarray):
+    x = x.reshape(-1, 1)
+    pf = PolynomialFeatures(degree=3, include_bias=True)
+    Xp = pf.fit_transform(x)
+    m = LinearRegression().fit(Xp, y)
+    return m, pf, Xp
 
-// ---------- 시간자료 해석 → { 'yyyyMMdd': [0시..23시] } ----------
-function parseHourlyText_(text) {
-  const colIndex = {};
-  let headerCols = null;
-  const rows = [];
-  text.split('\n').forEach(function (line) {
-    const t = line.trim();
-    if (!t) return;
-    if (t.startsWith('#')) {
-      const m = t.match(/^#\s*(\d+)\.\s*([A-Za-z0-9_]+)\s*:/);
-      if (m) { colIndex[m[2]] = Number(m[1]) - 1; return; }
-      if (!t.includes(':')) {
-        const toks = t.replace('#', '').trim().split(/\s+/);
-        if (toks.indexOf('STN') >= 0 && toks.indexOf('TA') >= 0) headerCols = toks;
-      }
-      return;
-    }
-    const p = t.split(/[\s,]+/);
-    if (/^\d{12}$/.test(p[0]) && p[1] === STN) rows.push(p);
-  });
-  let ti = colIndex['TA'];
-  if (ti === undefined && headerCols) ti = headerCols.indexOf('TA');
-  const out = {};
-  if (ti === undefined || ti < 0) return out;
-  rows.forEach(function (p) {
-    const ymd = p[0].slice(0, 8);
-    const hr = Number(p[0].slice(8, 10));
-    if (!out[ymd]) out[ymd] = new Array(24).fill('');
-    out[ymd][hr] = tempVal_(p[ti]);
-  });
-  return out;
-}
+def poly3_coeffs(m: LinearRegression) -> Tuple[float, float, float, float]:
+    b0 = float(m.intercept_)
+    c = m.coef_
+    b1 = float(c[1]) if len(c) > 1 else 0.0
+    b2 = float(c[2]) if len(c) > 2 else 0.0
+    b3 = float(c[3]) if len(c) > 3 else 0.0
+    return b0, b1, b2, b3
 
-function getHourly_(ymd) {
-  const KEY = PropertiesService.getScriptProperties().getProperty('KMA_KEY');
-  const text = fetchText_(BASE + 'kma_sfctm3.php?tm1=' + ymd + '0000&tm2=' + ymd
-                          + '2300&stn=' + STN + '&help=1&authKey=' + KEY);
-  const h = parseHourlyText_(text)[ymd];
-  if (!h) throw new Error('시간자료가 아직 없습니다. 응답 끝부분: ' + text.slice(-500));
-  return h;
-}
+def poly3_predict(m, pf, t):
+    return m.predict(pf.transform(np.array(t).reshape(-1,1)))
 
-// ---------- 시트 도우미 ----------
-function findRow_(sheet, dateStr) {
-  const dates = sheet.getRange(1, 1, sheet.getLastRow(), 1).getDisplayValues();
-  for (let i = 0; i < dates.length; i++) {
-    if (String(dates[i][0]).trim() === dateStr) return i + 1;
-  }
-  throw new Error('A열에서 ' + dateStr + ' 날짜 줄을 찾지 못했습니다.');
-}
+def poly3_r2(y_true, y_pred):
+    ss_res = np.sum((y_true - y_pred)**2)
+    ss_tot = np.sum((y_true - np.mean(y_true))**2)
+    return 1.0 - ss_res/ss_tot if ss_tot > 0 else np.nan
 
-function hasBlank_(arr) {
-  return arr.some(function (v) { return v === '' || v === null; });
-}
+def conf_band_y(x_train, y_train, tgrid, m, pf, z=1.645):  # 90% CI
+    X = pf.transform(x_train.reshape(-1,1))
+    yhat = m.predict(X)
+    n, p = X.shape
+    sigma2 = np.sum((y_train - yhat)**2) / max(1, (n - p))
+    XtX_inv = np.linalg.pinv(X.T @ X)
+    Tg = pf.transform(tgrid.reshape(-1,1))
+    se = np.sqrt(np.sum(Tg @ XtX_inv * Tg, axis=1) * sigma2)
+    ypred = m.predict(Tg)
+    return ypred - z*se, ypred + z*se, ypred, sigma2, XtX_inv
 
-// 비어 있는 칸에만 값을 채움 (이미 있는 값은 건드리지 않음)
-function fillBlanks_(sheet, r, col, vals) {
-  const rng = sheet.getRange(r, col, 1, vals.length);
-  const cur = rng.getValues()[0];
-  let changed = false;
-  for (let i = 0; i < vals.length; i++) {
-    if ((cur[i] === '' || cur[i] === null) && vals[i] !== '') {
-      cur[i] = vals[i];
-      changed = true;
-    }
-  }
-  if (changed) rng.setValues([cur]);
-}
+def d1_at(m: LinearRegression, t: float) -> float:
+    a,b,c,d = poly3_coeffs(m)
+    return b + 2*c*t + 3*d*(t**2)   # dQ/dT
 
-// ================== ① 매일 자동 실행용 ==================
-// 08:00, 08:30, 09:00, 09:30에 실행. 어제 줄(D~G, L~M, N~AL)이 모두 채워져 있으면 아무것도 하지 않음.
-function fetchDaeguTemp() {
-  const lock = LockService.getScriptLock();
-  if (!lock.tryLock(30000)) return; // 동시에 두 번 실행되는 것 방지
-  try {
-    const d = new Date();
-    d.setDate(d.getDate() - 1); // 어제
-    const ymd = Utilities.formatDate(d, 'Asia/Seoul', 'yyyyMMdd');
-    const dateStr = Utilities.formatDate(d, 'Asia/Seoul', 'yyyy-MM-dd');
+def nice_poly_string(a,b,c,d, digits=1):
+    def term(v, s, lead=False):
+        if abs(v) < 1e-12: return ""
+        sign = "" if lead and v>=0 else (" - " if v<0 else " + ")
+        return f"{sign}{abs(v):,.{digits}f}{s}"
+    # ★수정됨: T³ → T² → T → 절편 순 (고차항 우선)
+    s = term(d, "·T³", lead=True)
+    s += term(c, "·T²")
+    s += term(b, "·T")
+    s += term(a, "")
+    return "y = " + s
 
-    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
-    const r = findRow_(sheet, dateStr);
-    const msgs = [];
+def fmt_int(x):
+    try:
+        return f"{int(np.round(float(x))):,}"
+    except Exception:
+        return str(x)
 
-    const rngDG = function () { return sheet.getRange(r, 4, 1, 4).getValues()[0]; };    // D~G
-    const rngLM = function () { return sheet.getRange(r, 12, 1, 2).getValues()[0]; };   // L~M
-    const rngNAL = function () { return sheet.getRange(r, 14, 1, 25).getValues()[0]; }; // N~AL
+# ── Loader ─────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def read_excel_cached(path_or_buf) -> pd.DataFrame:
+    try:
+        import openpyxl  # noqa
+        engine = None
+    except Exception:
+        engine = "openpyxl"
+    try:
+        try:
+            return pd.read_excel(path_or_buf, sheet_name="data", engine=engine)
+        except Exception:
+            xls = pd.ExcelFile(path_or_buf, engine=engine)
+            return pd.read_excel(xls, sheet_name=xls.sheet_names[0])
+    except Exception as e:
+        st.error(f"엑셀 로딩 문제: {type(e).__name__} — {e}")
+        st.stop()
 
-    // D~G열: 평균기온 / 최저 / 최고 / 평균습도,  L열: 적설량(cm),  M열: 강수량(mm)
-    const blankDG = hasBlank_(rngDG());
-    const blankLM = hasBlank_(rngLM());
-    if (blankDG || blankLM) {
-      try {
-        const dv = getDaily_(ymd);
-        if (blankDG) fillBlanks_(sheet, r, 4, dv.slice(0, 4));
-        if (blankLM) fillBlanks_(sheet, r, 12, [dv[5], dv[4]]);
-      } catch (e) { msgs.push('일자료: ' + e.message); }
-    }
-    // N~AL열: 지점명, 0시~23시 기온
-    if (hasBlank_(rngNAL())) {
-      try { fillBlanks_(sheet, r, 14, [STN_NAME].concat(getHourly_(ymd))); }
-      catch (e) { msgs.push('시간자료: ' + e.message); }
-    }
+@st.cache_data(ttl=3600, show_spinner=False)   # ★수정됨: 1시간마다 시트를 다시 읽음
+def load_google_sheet_csv(url: str) -> pd.DataFrame:
+    try:
+        return pd.read_csv(url)
+    except Exception as e:
+        st.error(f"구글 시트 연동 오류: {type(e).__name__} — {e}")
+        st.stop()
 
-    const incomplete = hasBlank_(rngDG()) || hasBlank_(rngLM()) || hasBlank_(rngNAL());
-    if (!incomplete) { Logger.log(dateStr + ' 모두 채워짐'); return; }
+# ── 데이터 입력 (수정됨: 구글 시트 연동) ──────────────────────────────────────────────
+st.sidebar.header("① 데이터")
 
-    // 마지막 시도(09:20 이후)에도 빈 칸이 남으면 오류를 내서 알림이 가게 함
-    const hhmm = Number(Utilities.formatDate(new Date(), 'Asia/Seoul', 'HHmm'));
-    const msg = dateStr + ' 아직 빈 칸이 있습니다. ' + msgs.join(' | ');
-    if (hhmm >= 920) throw new Error(msg);
-    Logger.log(msg + ' (다음 실행에서 다시 시도)');
-  } finally {
-    lock.releaseLock();
-  }
-}
+# 구글 시트 URL을 CSV 다운로드 링크로 변환
+SHEET_ID = "13HrIz6OytYDykXeXzXJ02I6XbaKin1YaKBoO2kBd6Bs"
+GID = "0"
+SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
 
-// ================== ② 자동 실행(트리거) 설정: 한 번만 실행 ==================
-function setupTriggers() {
-  ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'fetchDaeguTemp') ScriptApp.deleteTrigger(t);
-  });
-  [[8, 0], [8, 30], [9, 0], [9, 30]].forEach(function (hm) {
-    ScriptApp.newTrigger('fetchDaeguTemp')
-      .timeBased().everyDays(1).atHour(hm[0]).nearMinute(hm[1])
-      .inTimezone('Asia/Seoul').create();
-  });
-  Logger.log('트리거 4개 생성 완료: 08:00, 08:30, 09:00, 09:30');
-}
+if st.sidebar.button("🔄 구글 시트 새로고침", help="시트에 새로 입력한 값(강수량·적설량 등)을 바로 반영합니다. 기본은 1시간마다 자동 갱신됩니다."):
+    st.cache_data.clear()
+    (getattr(st, "rerun", None) or st.experimental_rerun)()
 
-// ================== ②-2 강수/적설 열 준비: 한 번만 실행 ==================
-// L1 = 적설량(cm), M1 = 강수량(mm) 머리글을 쓰고, 예전에 M열(지점)에 들어 있던 지점번호(143)를 지웁니다.
-function setupPrecipColumns() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
-  sheet.getRange(1, 12).setValue('적설량(cm)');
-  sheet.getRange(1, 13).setValue('강수량(mm)');
-  const last = sheet.getLastRow();
-  let cleared = 0;
-  if (last >= 2) {
-    const rng = sheet.getRange(2, 13, last - 1, 1);
-    const vals = rng.getValues();
-    for (let i = 0; i < vals.length; i++) {
-      if (vals[i][0] !== '' && Number(vals[i][0]) === Number(STN)) { vals[i][0] = ''; cleared++; }
-    }
-    rng.setValues(vals);
-  }
-  Logger.log('머리글 설정 완료 / M열의 지점번호 ' + cleared + '칸 삭제');
-}
+uploaded = st.sidebar.file_uploader("엑셀 직접 업로드 (선택사항)", type=["xlsx"])
+if uploaded is not None:
+    raw = read_excel_cached(uploaded)
+    st.sidebar.success("업로드된 파일을 사용합니다.")
+else:
+    # 파일 업로드가 없으면 기본적으로 지정한 구글 시트(일일실적)를 불러옵니다.
+    raw = load_google_sheet_csv(SHEET_CSV_URL)
+    st.sidebar.info("구글 시트(일일실적) 데이터 연동 완료")
 
-// ================== ③ 확인용 (시트는 안 건드림) ==================
-function testDailyLog() {
-  Logger.log('11/12 [평균기온, 최저, 최고, 평균습도, 강수량, 적설량] = ' + getDaily_('20261112').join(', '));
-}
-// 비/눈이 왔던 것을 아는 날짜로 바꿔서 실행해 보세요. 강수량·적설량이 맞는지 확인용입니다.
-function testPrecipLog() {
-  ['20261105', '20261112', '20260115'].forEach(function (ymd) {
-    Logger.log(ymd + ' [평균기온, 최저, 최고, 평균습도, 강수량(mm), 적설량(cm)] = ' + getDaily_(ymd).join(', '));
-  });
-}
-// 일자료 응답에 어떤 항목(코드)이 있는지 보여줍니다. RN_DAY / SD_NEW 가 없다는 오류가 나면 여기서 확인하세요.
-function listDailyItems() {
-  const KEY = PropertiesService.getScriptProperties().getProperty('KMA_KEY');
-  const d = new Date(); d.setDate(d.getDate() - 2);
-  const ymd = Utilities.formatDate(d, 'Asia/Seoul', 'yyyyMMdd');
-  const text = fetchText_(BASE + 'kma_sfcdd.php?tm=' + ymd + '&stn=' + STN + '&disp=1&help=1&authKey=' + KEY);
-  text.split('\n').filter(function (l) { return l.trim().startsWith('#'); })
-      .forEach(function (l) { Logger.log(l.trim()); });
-}
-function testHourlyLog() {
-  Logger.log('10/31 시간별 기온: ' + getHourly_('20261031').join(', '));
-}
+cols = raw.columns.tolist()
 
-// 응답 상태 확인용 (시트는 안 건드림, 인증키는 로그에 남기지 않음)
-function debugDailyRaw() {
-  const KEY = PropertiesService.getScriptProperties().getProperty('KMA_KEY');
-  ['20261105', '20261118'].forEach(function (ymd) {
-    const res = UrlFetchApp.fetch(BASE + 'kma_sfcdd.php?tm=' + ymd + '&stn=' + STN
-                                  + '&disp=1&help=1&authKey=' + KEY, { muteHttpExceptions: true });
-    const text = res.getContentText('EUC-KR');
-    Logger.log(ymd + ' → HTTP ' + res.getResponseCode() + ' / 응답 길이 ' + text.length);
-    Logger.log('앞부분: ' + text.slice(0, 300));
-    Logger.log('끝부분: ' + text.slice(-300));
-  });
-}
+# ── ★추가됨: 기온 데이터 유형 선택 ──────────────────────────────────────────────────
+# 일일평균기온(원본) vs 월평균기온(월별 집계) 중 선택하여 분석에 사용
+st.sidebar.header("② 기온 데이터 유형")
+temp_mode = st.sidebar.radio(
+    "분석에 사용할 기온 유형",
+    options=["일일평균기온", "월평균기온"],
+    index=0,
+    help=(
+        "• 일일평균기온: 원본 일별 데이터 그대로 사용 (분산 큼, 극단 기온 반영)\n"
+        "• 월평균기온: 월별로 기온·공급량을 평균 집계 후 사용 (평활화, 계절 패턴 강조)"
+    )
+)
+# ── ★추가됨 끝 ───────────────────────────────────────────────────────────────────
 
-// 기간 조회(kma_sfcdd3) 응답이 어떻게 생겼는지 확인용 (시트는 안 건드림, 인증키는 로그에 남기지 않음)
-function testPeriodDaily() {
-  const KEY = PropertiesService.getScriptProperties().getProperty('KMA_KEY');
-  const res = UrlFetchApp.fetch(BASE + 'kma_sfcdd3.php?tm1=20160101&tm2=20160105&stn=' + STN
-                                + '&help=1&authKey=' + KEY, { muteHttpExceptions: true });
-  const text = res.getContentText('EUC-KR');
-  Logger.log('HTTP ' + res.getResponseCode() + ' / 응답 길이 ' + text.length);
-  Logger.log(text.slice(0, 1200));
-}
+# ③ 컬럼 매핑 — UI 숨김, 자동 매핑 로직만 유지
+def _pick(cands, default_idx=0):
+    for k in cands:
+        for c in cols:
+            if k in str(c): return c
+    return cols[default_idx] if len(cols) > default_idx else cols[-1]
 
-// ================== ④ 강수량·적설량 과거 데이터 채우기 (자동 이어달리기) ==================
-// backfillPrecip 을 한 번만 실행하면 됩니다.
-// L열(적설량)·M열(강수량)이 비어 있는 날만 오래된 날짜부터 요청하고, 처리할 때마다 시트에 바로 저장합니다.
-// 약 4분 반 일하고 멈춘 뒤, 남은 날이 있으면 1분 뒤 자동으로 다시 실행됩니다. 전부 끝나면 자동 실행도 해제됩니다.
-// 도중에 멈추고 싶으면 stopPrecip 을 실행하세요.
-function backfillPrecip() {
-  const lock = LockService.getScriptLock();
-  if (!lock.tryLock(20000)) { Logger.log('다른 작업이 실행 중이라 건너뜀'); return; }
-  try {
-    precipRun_();
-  } finally {
-    lock.releaseLock();
-  }
-}
+date_col = _pick(["일자","날짜","date"])
+temp_col = _pick(["평균기온","기온","temp"])
+q_col    = _pick(["공급량(MJ)","공급량","총","total","MJ"])
 
-function stopPrecip() {
-  clearPrecipTriggers_();
-  Logger.log('강수·적설 자동 이어달리기를 해제했습니다.');
-}
+# ── ★추가됨: 습도·최저/최고·계획 열 (없으면 None) ──
+def _find(cands):
+    for k in cands:
+        for c in cols:
+            if k in str(c): return c
+    return None
+hum_col  = _find(["습도", "humid"])
+tmin_col = _find(["최저"])
+tmax_col = _find(["최고"])
+plan_col = _find(["계획 공급량(MJ)", "계획공급량(MJ)"])
+snow_col = _find(["적설"])    # L열: 적설량(cm)
+rain_col = _find(["강수"])    # M열: 강수량(mm)
 
-function clearPrecipTriggers_() {
-  ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'backfillPrecip') ScriptApp.deleteTrigger(t);
-  });
-}
+df = raw.copy()
+df["date"] = pd.to_datetime(df[date_col])
+df["year"] = df["date"].dt.year
+df["month"]= df["date"].dt.month
+df["temp"] = df[temp_col].apply(to_num)
+df["Q"]    = df[q_col].apply(to_num)
+df["hum"]  = df[hum_col].apply(to_num)  if hum_col  else np.nan   # ★추가됨
+df["tmin"] = df[tmin_col].apply(to_num) if tmin_col else np.nan   # ★추가됨
+df["tmax"] = df[tmax_col].apply(to_num) if tmax_col else np.nan   # ★추가됨
+df["plan"] = df[plan_col].apply(to_num) if plan_col else np.nan   # ★추가됨
+df["snow"] = df[snow_col].apply(to_num) if snow_col else np.nan
+df["rain"] = df[rain_col].apply(to_num) if rain_col else np.nan
+df = df.dropna(subset=["temp","Q"]).sort_values("date")
 
-// 일자료 한 건 재요청 (빈 응답일 때 사용). 결과: { v: 해석값 또는 null, info: 상태 설명 }
-function retryDaily_(ymd) {
-  const KEY = PropertiesService.getScriptProperties().getProperty('KMA_KEY');
-  Utilities.sleep(1500);
-  try {
-    const res = UrlFetchApp.fetch(BASE + 'kma_sfcdd.php?tm=' + ymd + '&stn=' + STN
-                                  + '&disp=1&help=1&authKey=' + KEY, { muteHttpExceptions: true });
-    const text = res.getContentText('EUC-KR');
-    return {
-      v: parseDailyText_(text),
-      info: 'HTTP ' + res.getResponseCode() + ' / 길이 ' + text.length + ' / 끝부분: ' + text.slice(-120).replace(/\n/g, ' ')
-    };
-  } catch (e) {
-    return { v: null, info: '오류: ' + e.message };
-  }
-}
+# ── ★추가됨: 기온 유형에 따라 분석용 데이터프레임(df_model) 분기 ─────────────────────
+# df_model 은 이후 train 생성, 그래프 A·B·산점도 학습 데이터로만 사용
+# G섹션(히트맵) 등 원본 일일 데이터를 쓰는 곳은 df / raw 그대로 유지
+if temp_mode == "월평균기온":
+    # 월별 집계: 기온은 평균, 공급량은 합산
+    # → 월 단위 분석이므로 공급량은 월합계가 물리적으로 맞음
+    df_monthly = (
+        df.groupby(["year", "month"])
+        .agg(temp=("temp", "mean"), Q=("Q", "sum"))
+        .reset_index()
+    )
+    # 대표 날짜(월 1일)를 date 컬럼으로 부여 (year/month 컬럼 유지)
+    df_monthly["date"] = pd.to_datetime(
+        df_monthly[["year","month"]].assign(day=1)
+    )
+    df_model = df_monthly.sort_values("date").reset_index(drop=True)
+    mode_label = "월평균기온 기반 (월합산 공급량)"
+else:
+    df_model = df.copy()
+    mode_label = "일일평균기온 기반 (일별 공급량)"
 
-function precipRun_() {
-  const t0 = Date.now();
-  const BUDGET_MS = 270000; // 4분 30초
-  const BATCH = 5;          // 한 번에 5건씩만 요청 (많이 보내면 기상청이 빈 응답을 줌)
-  const KEY = PropertiesService.getScriptProperties().getProperty('KMA_KEY');
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
+st.info(f"📊 현재 분석 모드: **{mode_label}** · 분석 행 수: {len(df_model):,}")
+# ── ★추가됨 끝 ───────────────────────────────────────────────────────────────────
 
-  const yest = new Date();
-  yest.setDate(yest.getDate() - 1);
-  const yestYmd = Utilities.formatDate(yest, 'Asia/Seoul', 'yyyyMMdd');
+st.success(f"행 {len(df):,} · 기간 {df['date'].min().date()} ~ {df['date'].max().date()}")
 
-  const aVals = sheet.getRange(1, 1, sheet.getLastRow(), 1).getDisplayValues();
-  const rowOf = {};
-  for (let i = 0; i < aVals.length; i++) {
-    const s = String(aVals[i][0]).trim().replace(/-/g, '');
-    if (/^\d{8}$/.test(s)) rowOf[s] = i + 1;
-  }
+# 학습 연도
+st.sidebar.header("④ 학습 연도")
+years = sorted(df["year"].unique().tolist())
+DEFAULT_START_YEAR = 2016   # 습도 데이터가 있는 첫 해 (기본 학습 연도 시작)
+default_years = [y for y in years if y >= DEFAULT_START_YEAR] or years
+sel_years = st.sidebar.multiselect("연도 선택", years, default=default_years)
 
-  // 2016-01-01 ~ 어제 중 시트에 줄이 있는 날짜
-  const all = [];
-  for (let d = '20160101'; d <= yestYmd; d = addDays_(d, 1)) {
-    if (rowOf[d]) all.push(d);
-  }
-  if (!all.length) { Logger.log('대상 날짜가 없습니다.'); clearPrecipTriggers_(); return; }
+# ── ★수정됨: train을 df_model 기준으로 생성 (기존: df 기준) ──────────────────────────
+train = df_model[df_model["year"].isin(sel_years)].copy()
+# ── ★수정됨 끝 ───────────────────────────────────────────────────────────────────
 
-  const minRow = rowOf[all[0]];
-  const maxRow = rowOf[all[all.length - 1]];
-  const nRows = maxRow - minRow + 1;
-  const block = sheet.getRange(minRow, 12, nRows, 2).getValues(); // L~M
+if train.empty:
+    st.warning("선택된 연도에 데이터가 없습니다."); st.stop()
 
-  // L 또는 M이 비어 있는 날만 대상 (0은 값이 있는 것으로 봄)
-  const todo = all.filter(function (d) {
-    const v = block[rowOf[d] - minRow];
-    return v[0] === '' || v[0] === null || v[1] === '' || v[1] === null;
-  });
-  if (!todo.length) {
-    Logger.log('모든 날짜의 강수·적설이 채워져 있습니다. 완료!');
-    clearPrecipTriggers_();
-    return;
-  }
+# ── 시각 범위 ────────────────────────────────────────────────
+T = train["temp"].values
+p1, p99 = np.percentile(T, 1), np.percentile(T, 99)
+xmin_vis = float(np.floor(min(-5, p1 - 1.5)))
+xmax_vis = float(np.ceil(max(25, p99 + 1.5)))
 
-  let done = 0, filled = 0, noData = 0, failed = 0, aborted = false;
-  const blankDates = [];
-  let noDataInfo = '';
-  let sinceSave = 0;
+# ── Poly-3 적합(전체) ────────────────────────────────────────
+m_all, pf_all, Xp = fit_poly3(train["temp"].values, train["Q"].values)
+yhat = m_all.predict(Xp)
+r2   = poly3_r2(train["Q"].values, yhat)
+a,b,c,d = poly3_coeffs(m_all)
+eq_str  = nice_poly_string(a,b,c,d, digits=1)
 
-  for (let i = 0; i < todo.length; i += BATCH) {
-    if (Date.now() - t0 > BUDGET_MS) break;
-    const part = todo.slice(i, i + BATCH);
-    const reqs = part.map(function (d) {
-      return {
-        url: BASE + 'kma_sfcdd.php?tm=' + d + '&stn=' + STN + '&disp=1&help=1&authKey=' + KEY,
-        muteHttpExceptions: true
-      };
-    });
-    const res = fetchAllSafe_(reqs);
-    for (let k = 0; k < part.length; k++) {
-      const r = res[k];
-      if (!r) { failed++; continue; }
-      let v = null;
-      try {
-        v = parseDailyText_(r.getContentText('EUC-KR'));
-      } catch (e) {
-        Logger.log('해석 오류(' + part[k] + '): ' + e.message);
-        aborted = true;
-        break;
-      }
-      if (!v) {
-        // 빈 응답이면 한 건씩 천천히 다시 요청
-        const rr = retryDaily_(part[k]);
-        v = rr.v;
-        if (!v) {
-          noData++;
-          if (!noDataInfo) noDataInfo = part[k] + ' → ' + rr.info;
-          continue;
-        }
-      }
-      const idx = rowOf[part[k]] - minRow;
-      if (v[5] !== '') block[idx][0] = v[5];  // L: 적설량
-      if (v[4] !== '') block[idx][1] = v[4];  // M: 강수량
-      if (v[5] === '' || v[4] === '') blankDates.push(part[k]);
-      filled++;
-    }
-    if (aborted) break;
-    done += part.length;
-    sinceSave++;
-    if (sinceSave >= 3) {
-      sheet.getRange(minRow, 12, nRows, 2).setValues(block);
-      sinceSave = 0;
-    }
-    Utilities.sleep(300);
-  }
-  sheet.getRange(minRow, 12, nRows, 2).setValues(block); // 마지막 저장
+# 촘촘한 그리드 + 90% CI
+tgrid = np.linspace(xmin_vis, xmax_vis, 1201)
+ci_lo_90, ci_hi_90, y_pred, sigma2, XtX_inv = conf_band_y(
+    train["temp"].values, train["Q"].values, tgrid, m_all, pf_all, z=1.645
+)
 
-  const remain = todo.length - done;
-  Logger.log('이번 실행: 요청 ' + done + '일 / 입력 ' + filled + '일 / 자료 없음 ' + noData
-    + '일 / 접속 실패 ' + failed + '건 / 남은 날짜 약 ' + remain + '일 / 걸린 시간 '
-    + Math.round((Date.now() - t0) / 1000) + '초');
-  if (blankDates.length) {
-    Logger.log('값이 비어 온 날짜(앞 10개): ' + blankDates.slice(0, 10).join(', '));
-  }
-  if (noDataInfo) {
-    Logger.log('자료 없음 첫 사례: ' + noDataInfo);
-  }
+# ── 도함수(민감도) ───────────────────────────────────────────
+J = np.vstack([np.ones_like(tgrid)*0, np.ones_like(tgrid), 2*tgrid, 3*(tgrid**2)]).T
+deriv_mean = np.array([d1_at(m_all, t) for t in tgrid])        # dQ/dT
+deriv_se   = np.sqrt(np.sum(J @ XtX_inv * J, axis=1) * sigma2)
+z90 = 1.645
+d_lo = deriv_mean - z90*deriv_se
+d_hi = deriv_mean + z90*deriv_se
 
-  clearPrecipTriggers_();
-  if (aborted) {
-    Logger.log('오류로 중단했습니다. 위 메시지를 확인하세요. (자동 재실행 안 함)');
-  } else if (remain > 0 || failed > 0) {
-    ScriptApp.newTrigger('backfillPrecip').timeBased().after(60 * 1000).create();
-    Logger.log('1분 뒤 자동으로 이어서 실행됩니다.');
-  } else {
-    Logger.log('이번 범위 처리 완료. (값이 비어 온 날은 다음에 backfillPrecip 을 다시 실행하면 재시도합니다.)');
-  }
-}
+# ── 부드러운 ReLU로 양수화(0 부근 꺾임 제거) ────────────────
+def smooth_relu(x, eps):
+    return 0.5 * (x + np.sqrt(x*x + eps*eps))
+eps_rel = 0.015 * max(1.0, float(np.nanmax(np.abs(deriv_mean))))
 
-// ================== ⑤ 시간별 기온 + D~G(기온·습도) 과거 데이터 채우기 (빈 곳 보정용) ==================
-// ※ 강수량·적설량(L~M열)은 위의 backfillPrecip 이 담당합니다. 이쪽은 건드리지 않습니다.
-function backfillTest() { backfill_('20160101', '20160103'); }
-function backfill2016() { backfillYear_(2016); }
-function backfill2017() { backfillYear_(2017); }
-function backfill2018() { backfillYear_(2018); }
-function backfill2019() { backfillYear_(2019); }
-function backfill2020() { backfillYear_(2020); }
-function backfill2021() { backfillYear_(2021); }
-function backfill2022() { backfillYear_(2022); }
-function backfill2023() { backfillYear_(2023); }
-function backfill2024() { backfillYear_(2024); }
-function backfill2025() { backfillYear_(2025); }
-function backfill2026() { backfillYear_(2026); }
+base_inc = smooth_relu(-deriv_mean, eps_rel)   # Raw 증가량
+base_lo  = smooth_relu(-d_hi, eps_rel)
+base_hi  = smooth_relu(-d_lo, eps_rel)
 
-function backfillYear_(y) {
-  const yest = new Date();
-  yest.setDate(yest.getDate() - 1);
-  const yestYmd = Utilities.formatDate(yest, 'Asia/Seoul', 'yyyyMMdd');
-  let end = y + '1231';
-  if (end > yestYmd) end = yestYmd;
-  backfill_(y + '0101', end);
-}
+# ── 저온 완화(시나리오 토글만, 기본 OFF) ─────────────────────
+st.sidebar.header("⑤ 시뮬레이션 옵션")
+auto_zoom = st.sidebar.toggle("밴드 자동 Y축 줌(곡률 강조)", value=True)
+use_cold  = st.sidebar.toggle("저온 완화 시나리오(극저온에서 증가량 둔화)", value=False)
 
-function backfill_(startYmd, endYmd) {
-  const KEY = PropertiesService.getScriptProperties().getProperty('KMA_KEY');
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
+# 고정 파라미터(문서화 목적)
+T_COLD_FIXED = -2.0   # ℃
+TAU_FIXED    = 1.5    # ℃
 
-  const aVals = sheet.getRange(1, 1, sheet.getLastRow(), 1).getDisplayValues();
-  const rowOf = {};
-  for (let i = 0; i < aVals.length; i++) {
-    const s = String(aVals[i][0]).trim().replace(/-/g, '');
-    if (/^\d{8}$/.test(s)) rowOf[s] = i + 1;
-  }
+def sigmoid(x): return 1/(1+np.exp(-x))
+def smoothstep(x, w=1.2, c=0.0): return 0.5 * (1 + np.tanh((x - c) / w))
 
-  const dates = [];
-  for (let d = startYmd; d <= endYmd; d = addDays_(d, 1)) dates.push(d);
-  dates.forEach(function (d) {
-    if (!rowOf[d]) throw new Error('A열에 ' + d + ' 날짜 줄이 없습니다.');
-  });
-  const minRow = rowOf[dates[0]];
-  const maxRow = rowOf[dates[dates.length - 1]];
-  const nRows = maxRow - minRow + 1;
-  let failed = 0;
+if use_cold:
+    cf_raw = sigmoid((tgrid - T_COLD_FIXED)/TAU_FIXED)
+    blend  = smoothstep(tgrid, w=1.2, c=0.0)
+    cold_factor = cf_raw*(1.0 - blend) + 1.0*blend
+else:
+    cold_factor = np.ones_like(tgrid)
 
-  // 1) 시간별 기온 (30일 단위, 항상 덮어씀) → N~AL열(지점명 + 0~23시)
-  const hReqs = [];
-  for (let s = startYmd; s <= endYmd; s = addDays_(s, 30)) {
-    let e = addDays_(s, 29);
-    if (e > endYmd) e = endYmd;
-    hReqs.push({
-      url: BASE + 'kma_sfctm3.php?tm1=' + s + '0000&tm2=' + e + '2300&stn=' + STN
-           + '&help=1&authKey=' + KEY,
-      muteHttpExceptions: true
-    });
-  }
-  const hourly = {};
-  fetchAllSafe_(hReqs).forEach(function (r) {
-    if (!r) { failed++; return; }
-    const part = parseHourlyText_(r.getContentText('EUC-KR'));
-    Object.keys(part).forEach(function (k) { hourly[k] = part[k]; });
-  });
+inc    = base_inc * cold_factor
+inc_lo = base_lo  * cold_factor
+inc_hi = base_hi  * cold_factor
 
-  const hBlock = sheet.getRange(minRow, 14, nRows, 25).getValues();
-  let hCount = 0;
-  dates.forEach(function (d) {
-    if (hourly[d]) {
-      hBlock[rowOf[d] - minRow] = [STN_NAME].concat(hourly[d]);
-      hCount++;
-    }
-  });
-  sheet.getRange(minRow, 14, nRows, 25).setValues(hBlock);
+# ── 열량 입력(환산) ──────────────────────────────────────────
+st.sidebar.header("⑥ 열량(환산 단위)")
+calorific = st.sidebar.number_input(
+    "열량 (MJ/Nm³)", min_value=30.000, max_value=55.000, value=42.563, step=0.001, format="%.3f"
+)
+def to_m3_per_deg(mj_per_deg: float, cv: float) -> float:
+    if cv is None or cv <= 0:
+        return np.nan
+    return mj_per_deg / cv
 
-  // 2) 일자료: D~G열(평균기온/최저/최고/습도)에 빈 칸이 있는 날만 요청해서 빈 칸만 채움
-  const dBlock = sheet.getRange(minRow, 4, nRows, 4).getValues();
-  const need = dates.filter(function (d) {
-    return hasBlank_(dBlock[rowOf[d] - minRow]);
-  });
+# ── 난방 시작/둔화/포화(참고) ────────────────────────────────
+def hinge_base_temp(T: np.ndarray, Q: np.ndarray,
+                    grid_min: float=0.0, grid_max: float=20.0, step: float=0.1):
+    thetas = np.arange(grid_min, grid_max + 1e-9, step)
+    best_th, best_a, best_b, best_rmse = np.nan, np.nan, np.nan, np.inf
+    T = T.reshape(-1); Q = Q.reshape(-1)
+    X1 = np.ones_like(T)
+    for th in thetas:
+        H = np.clip(th - T, 0, None)
+        X = np.column_stack([X1, H])
+        beta, *_ = np.linalg.lstsq(X, Q, rcond=None)
+        pred = X @ beta
+        rmse = np.sqrt(np.mean((Q - pred)**2))
+        if rmse < best_rmse:
+            best_rmse = rmse
+            best_th, best_a, best_b = th, float(beta[0]), float(beta[1])
+    return best_th, best_a, best_b
 
-  const daily = {};
-  const BATCH = 15;
-  for (let i = 0; i < need.length; i += BATCH) {
-    const part = need.slice(i, i + BATCH);
-    const reqs = part.map(function (d) {
-      return {
-        url: BASE + 'kma_sfcdd.php?tm=' + d + '&stn=' + STN + '&disp=1&help=1&authKey=' + KEY,
-        muteHttpExceptions: true
-      };
-    });
-    fetchAllSafe_(reqs).forEach(function (r, k) {
-      if (!r) { failed++; return; }
-      const v = parseDailyText_(r.getContentText('EUC-KR'));
-      if (v) daily[part[k]] = v;
-    });
-    Utilities.sleep(500);
-  }
+theta_star, a_hat, b_hat = hinge_base_temp(train["temp"].values, train["Q"].values, 0.0, 20.0, 0.1)
+T_slow   = float(tgrid[int(np.argmin(deriv_mean))])
+max_neg  = float(np.max(inc))
+T_cap    = float(tgrid[np.argmax(inc <= 0.02*max_neg)]) if max_neg>0 else np.nan
 
-  let dCount = 0;
-  need.forEach(function (d) {
-    if (!daily[d]) return;
-    const row = dBlock[rowOf[d] - minRow];
-    for (let c = 0; c < 4; c++) {
-      if ((row[c] === '' || row[c] === null) && daily[d][c] !== '') {
-        row[c] = daily[d][c];
-        dCount++;
-      }
-    }
-  });
-  sheet.getRange(minRow, 4, nRows, 4).setValues(dBlock);
+def fit_hinge_cubic(T: np.ndarray, Q: np.ndarray, theta: float) -> Tuple[float,float,float,float]:
+    H = np.clip(theta - T, 0, None)
+    X = np.column_stack([np.ones_like(H), H, H**2, H**3])
+    beta, *_ = np.linalg.lstsq(X, Q, rcond=None)
+    a_c, b_c, c_c, d_c = map(float, beta)
+    return a_c, b_c, c_c, d_c
+a_c, b_c, c_c, d_c = fit_hinge_cubic(train["temp"].values, train["Q"].values, theta_star)
 
-  Logger.log('완료 ' + startYmd + '~' + endYmd + ' / 전체 ' + dates.length + '일'
-    + ' / 시간별 기온 입력 ' + hCount + '일'
-    + ' / D~G 빈 날 ' + need.length + '일 → 새로 채운 칸 ' + dCount + '개'
-    + ' / 접속 실패 ' + failed + '건');
-}
+def qhat_cubic(t: np.ndarray, theta: float, a_c: float, b_c: float, c_c: float, d_c: float, k: float) -> np.ndarray:
+    H = np.clip(theta - t, 0, None)
+    return a_c + b_c*H + (k*c_c)*(H**2) + (k*d_c)*(H**3)
+
+# ── (A) 상관 그래프 (수정됨: 일일 데이터 시각화를 위해 점 크기 축소) ────────────────────────
+st.subheader("🧮 A. 기온–공급량 상관 (Poly-3, 90% CI)")
+figA = go.Figure()
+figA.add_trace(go.Scatter(
+    x=train["temp"], y=train["Q"], mode="markers", name="샘플",
+    marker=dict(size=4, opacity=0.5, line=dict(width=0.2), symbol="circle"),
+    hovertemplate="T=%{x:.2f}℃<br>Q=%{y:,.0f} MJ<extra></extra>"
+))
+figA.add_trace(go.Scatter(
+    x=np.r_[tgrid, tgrid[::-1]], y=np.r_[ci_hi_90, ci_lo_90[::-1]],
+    fill="toself", name="90% CI",
+    line=dict(color="rgba(0,0,0,0)"),
+    fillcolor="rgba(0,123,255,0.18)", hoverinfo="skip"
+))
+figA.add_trace(go.Scatter(
+    x=tgrid, y=y_pred, mode="lines", name="Poly-3", line=dict(width=3),
+    hovertemplate="T=%{x:.2f}℃<br>예측=%{y:,.0f} MJ<extra></extra>"
+))
+figA.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
+                   margin=dict(l=40,r=20,t=40,b=40),
+                   xaxis=dict(title="기온(℃)", range=[xmin_vis, xmax_vis]),
+                   yaxis=dict(title="공급량(MJ)", tickformat=","), 
+                   title=f"R²={r2:.3f} · 식: {eq_str}")
+st.plotly_chart(figA, use_container_width=True, config={"displaylogo": False, "scrollZoom": True, "modeBarButtonsToAdd": ["resetScale2d"]})
+
+# ── (B) 수요곡선 — 힌지 시각화 (수정됨: 일일 데이터 시각화를 위해 점 크기 축소) ───────────────
+st.subheader("🧊 B. Heating Start / Slowdown — 수요곡선")
+tline = np.linspace(xmin_vis, xmax_vis, 600)
+qhat_curve = qhat_cubic(tline, theta_star, a_c, b_c, c_c, d_c, 1.0) # ★수정됨: 2.0에서 1.0으로 변경하여 곡선이 중앙을 관통하도록 보완
+
+figB = go.Figure()
+figB.add_trace(go.Scatter(x=df_model["temp"], y=df_model["Q"], mode="markers", name="전체(참고)",
+                          marker=dict(size=3, color="lightgray"), opacity=0.3))
+figB.add_trace(go.Scatter(x=train["temp"], y=train["Q"], mode="markers", name="학습",
+                          marker=dict(size=4), marker_color="orange", opacity=0.6))
+figB.add_trace(go.Scatter(
+    x=tline, y=qhat_curve, mode="lines", name="힌지(곡선) 적합",
+    line=dict(width=3, shape="spline", smoothing=1.1)
+))
+
+figB.add_vrect(x0=xmin_vis, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.18, line_width=0, layer="below")
+figB.add_annotation(x=(xmin_vis+theta_star)/2, y=1.12, xref="x", yref="paper",
+                    text="난방 시작 구간 (Heating Start)", showarrow=False,
+                    font=dict(size=12), bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
+figB.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.14, line_width=0, layer="below")
+figB.add_annotation(x=(xmin_vis+T_slow)/2, y=1.12, xref="x", yref="paper",
+                    text=f"난방 포화 구간 (총 사용량 증가, 증가폭은 둔화 ≤ {T_slow:.2f}℃)", showarrow=False,
+                    font=dict(size=12), bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
+figB.add_vline(x=theta_star, line_dash="dash")
+figB.add_annotation(x=theta_star, y=1.14, xref="x", yref="paper",
+                    text=f"Start θ* = {theta_star:.2f}℃", showarrow=False, font=dict(size=12),
+                    bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
+if np.isfinite(T_cap):
+    figB.add_vline(x=T_cap, line_dash="dot")
+    figB.add_annotation(x=T_cap, y=1.10, xref="x", yref="paper",
+                        text=f"Saturation {T_cap:.2f}℃", showarrow=False, font=dict(size=12),
+                        bgcolor="rgba(255,255,255,0.7)", bordercolor="rgba(0,0,0,0.1)")
+
+figB.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
+                   margin=dict(l=40,r=20,t=60,b=70),
+                   xaxis=dict(title="기온(℃)", range=[xmin_vis, xmax_vis]),
+                   yaxis=dict(title="공급량(MJ)", tickformat=","),
+                   legend=dict(orientation="h", yanchor="top", y=-0.18, x=0.01))
+st.plotly_chart(figB, use_container_width=True, config={"displaylogo": False, "scrollZoom": True, "modeBarButtonsToAdd": ["resetScale2d"]})
+
+# ── (C) 기온별 공급량 변화량 요약 ───────────────────────────
+st.subheader("🌡️ C. 기온별 공급량 변화량 요약")
+
+def band_mean(temp_array, apply_cold=True):
+    temps = np.array(temp_array, dtype=float)
+    base = smooth_relu(-np.array([d1_at(m_all, t) for t in temps]), eps_rel)
+    if apply_cold and use_cold:
+        cf_raw = 1/(1+np.exp(-(temps - T_COLD_FIXED)/TAU_FIXED))
+        blend  = 0.5*(1 + np.tanh((temps - 0.0)/1.2))
+        cf = cf_raw*(1.0 - blend) + 1.0*blend
+        base = base * cf
+    return float(np.mean(base))
+
+total_mean_temp = train["temp"].mean()
+avg_total = band_mean([total_mean_temp], apply_cold=True)
+avg_total_nm3 = to_m3_per_deg(avg_total, calorific)
+
+band = {"−5~0℃": np.arange(-5, 0.001, 0.1),
+        "0~5℃" : np.arange(0, 5.001, 0.1),
+        "5~10℃": np.arange(5,10.001,0.1)}
+
+avg_m5_0  = band_mean(band["−5~0℃"], apply_cold=True)
+avg_0_5   = band_mean(band["0~5℃"],  apply_cold=True)
+avg_5_10  = band_mean(band["5~10℃"], apply_cold=True)
+
+avg_m5_0_nm3 = to_m3_per_deg(avg_m5_0, calorific)
+avg_0_5_nm3  = to_m3_per_deg(avg_0_5,  calorific)
+avg_5_10_nm3 = to_m3_per_deg(avg_5_10, calorific)
+
+st.markdown(
+f"""
+**Polynomial Regression (degree 3)** **{eq_str}**
+
+- **Supply ↑ per −1°C (Total Avg @ {total_mean_temp:.1f}℃)** : **{fmt_int(avg_total)} MJ/℃, {fmt_int(avg_total_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
+- **Supply ↑ per −1°C (−5~0℃)** : **{fmt_int(avg_m5_0)} MJ/℃, {fmt_int(avg_m5_0_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
+- **Supply ↑ per −1°C (0~5℃)**  : **{fmt_int(avg_0_5)} MJ/℃, {fmt_int(avg_0_5_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
+- **Supply ↑ per −1°C (5~10℃)** : **{fmt_int(avg_5_10)} MJ/℃, {fmt_int(avg_5_10_nm3)} Nm³/℃** (단위열량 {calorific:.3f} MJ/Nm³ 적용)
+"""
+)
+
+# ── (D) 구간별 동적 그래프 ───────────────────────────────────
+st.subheader("📈 D. 기온 구간별 동적 그래프 (−dQ/dT = 1℃ 하락 시 증가량, 90% CI)")
+tab1, tab2, tab3 = st.tabs(["−5~0℃", "0~5℃", "5~10℃"])
+
+def band_plot(ax, loT, hiT, label):
+    mask = (tgrid>=loT) & (tgrid<=hiT)
+    x = tgrid[mask]
+    y_mid = inc[mask]
+    y_lo  = inc_lo[mask]
+    y_hi  = inc_hi[mask]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=np.r_[x, x[::-1]],
+        y=np.r_[y_hi, y_lo[::-1]],
+        fill="toself", name="90% CI (±)", line=dict(color="rgba(0,0,0,0)"),
+        fillcolor="rgba(0,123,255,0.15)", hoverinfo="skip"
+    ))
+    fig.add_trace(go.Scatter(
+        x=x, y=y_mid, mode="lines", name="증가량(MJ/℃)",
+        line=dict(width=3, shape="spline", smoothing=0.9),
+        hovertemplate="T=%{x:.2f}℃<br>증가량=%{y:,.0f} MJ/℃<extra></extra>"
+    ))
+    avg = float(np.mean(y_mid))
+    fig.add_annotation(x=(loT+hiT)/2, y=np.max(y_hi),
+                       text=f"Band Avg = {fmt_int(avg)} MJ/℃", showarrow=False, yshift=18)
+    if auto_zoom:
+        y_min, y_max = float(np.min(y_mid)), float(np.max(y_mid))
+        pad = 0.08 * (y_max - y_min if y_max>y_min else max(1.0, y_max))
+        fig.update_yaxes(range=[y_min - pad, y_max + pad])
+    fig.update_layout(template="simple_white", font=dict(family=PLOT_FONT, size=14),
+                      margin=dict(l=40,r=20,t=40,b=40),
+                      xaxis=dict(title="기온(℃)", range=[loT, hiT], fixedrange=True),
+                      yaxis=dict(title="Δ1℃ 증가량(MJ/℃)", tickformat=",", fixedrange=False),
+                      title=f"Band {label} Response",
+                      dragmode="zoom")
+    ax.plotly_chart(fig, use_container_width=True, config={
+        "displaylogo": False,
+        "scrollZoom": True,
+        "modeBarButtonsToAdd": ["resetScale2d"],
+    })
+
+with tab1: band_plot(st, -5, 0, "−5~0℃")
+with tab2: band_plot(st, 0, 5, "0~5℃")
+with tab3: band_plot(st, 5, 10, "5~10℃")
+
+# ── (E) 전체 곡선 ───────────────────────────────────────────
+st.subheader("🧭 E. Refined Gas Supply Rate of Change (Dynamic)")
+figE = go.Figure()
+figE.add_trace(go.Scatter(
+    x=tgrid, y=inc, mode="lines", name="증가량(MJ/℃)",
+    line=dict(width=3, shape="spline", smoothing=1.2),
+    hovertemplate="T=%{x:.2f}℃<br>증가량=%{y:,.0f} MJ/℃<extra></extra>"
+))
+figE.add_vrect(x0=xmin_vis, x1=T_slow, fillcolor="LightCoral", opacity=0.12, line_width=0, layer="below")
+figE.add_vrect(x0=T_slow, x1=theta_star, fillcolor="LightSkyBlue", opacity=0.12, line_width=0, layer="below")
+
+def top_note(x, text, y=1.12):
+    figE.add_annotation(x=x, y=y, xref="x", yref="paper", showarrow=False, text=text,
+                        font=dict(size=12), bgcolor="rgba(255,255,255,0.75)",
+                        bordercolor="rgba(0,0,0,0.12)", borderwidth=1)
+                        
+top_note((xmin_vis+T_slow)/2,  f"난방 포화 구간 (증가폭 둔화, ≤ {T_slow:.2f}℃)")
+top_note((T_slow+theta_star)/2, f"난방 시작 구간 ({T_slow:.2f}~{theta_star:.2f}℃)")
+
+figE.add_vline(x=theta_star, line_dash="dash", line_color="black")
+figE.add_annotation(x=theta_star, y=1.14, xref="x", yref="paper",
+                    text=f"Start θ* {theta_star:.2f}℃", showarrow=False,
+                    font=dict(size=12), bgcolor="rgba(255,255,255,0.75)",
+                    bordercolor="rgba(0,0,0,0.12)", borderwidth=1)
+
+figE.update_layout(
+    template="simple_white", font=dict(family=PLOT_FONT, size=14),
+    margin=dict(l=40,r=20,t=40,b=80),
+    xaxis=dict(title="Temperature (℃)", range=[xmin_vis, xmax_vis]),
+    yaxis=dict(title="Rate of Change (MJ/℃, +가 증가)", tickformat=","),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0)
+)
+st.plotly_chart(figE, use_container_width=True, config={"displaylogo": False})
+
+# ── (F) XLSX 다운로드 ───────────────────────────────────────
+st.subheader("📥 F. 결과 다운로드")
+@st.cache_data(show_spinner=False)
+def build_xlsx_bytes():
+    try:
+        import xlsxwriter  # noqa
+        engine = "xlsxwriter"
+    except Exception:
+        engine = "openpyxl"
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine=engine) as wr:
+        summary = pd.DataFrame({
+            "항목":["식(Poly-3)","R²","Start θ*","Slowdown","Saturation(추정)",
+                  "T_cold(℃)","τ(℃)","시나리오 사용여부","열량(MJ/Nm³)"],
+            "값":[eq_str, r2, theta_star, T_slow, T_cap, T_COLD_FIXED, TAU_FIXED, use_cold, calorific]
+        })
+        summary.to_excel(wr, index=False, sheet_name="Summary")
+        pd.DataFrame({"a0":[a], "b1":[b], "c2":[c], "d3":[d]}).to_excel(wr, index=False, sheet_name="Coefficients")
+        pd.DataFrame({
+            "Band":["−5~0℃","0~5℃","5~10℃"],
+            "Δ1℃ 증가량(MJ/℃)":[float(avg_m5_0), float(avg_0_5), float(avg_5_10)],
+            "Δ1℃ 증가량(Nm³/℃)":[float(avg_m5_0_nm3), float(avg_0_5_nm3), float(avg_5_10_nm3)],
+            "열량(MJ/Nm³)":[float(calorific), float(calorific), float(calorific)]
+        }).to_excel(wr, index=False, sheet_name="Band_Average")
+        pd.DataFrame({"T(℃)":tgrid,
+                      "Δ1℃ 증가량(MJ/℃)":inc,
+                      "CI_lo(90%)":inc_lo, "CI_hi(90%)":inc_hi}).to_excel(wr, index=False, sheet_name="Curve")
+    buf.seek(0)
+    return buf.getvalue()
+
+xlsx_bytes = build_xlsx_bytes()
+st.download_button(
+    "📥 민감도 요약·곡선 XLSX 다운로드",
+    data=xlsx_bytes, file_name="HeatBand_Insight.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+st.caption("본 화면의 기본 수치는 Raw(Poly-3 직접 민감도)이며, '저온 완화'는 별도 시나리오로만 적용됩니다.")
+
+# ============================================================
+# H. 습도 분석 — 계절별: 맑은 날 기준 습도 / 습도 +10%p당 공급량 영향 (과거 실적 해석용, 예측에는 사용하지 않음)
+# ============================================================
+st.subheader("💧 H. 습도 분석 — 계절별 맑은 날 기준 습도와 습도 +10%p당 공급량 영향 (과거 실적)")
+
+HUM_SEASONS = [("동절기 (12~2월)", [12, 1, 2]),
+               ("간절기·봄 (3~4월)", [3, 4]),
+               ("간절기·가을 (10~11월)", [10, 11])]
+
+if hum_col is None or int(df["hum"].notna().sum()) < 100:
+    st.info("시트에서 '습도' 열을 찾지 못했거나 습도 데이터가 부족합니다.")
+else:
+    dd = df[df["year"].isin(sel_years)].dropna(subset=["temp", "Q", "hum"]).copy()
+    dd["dtr"] = dd["tmax"] - dd["tmin"]                              # 일교차 (맑은 날 대용 지표)
+    dd["weekend"] = (dd["date"].dt.dayofweek >= 5).astype(float)     # 주말 효과 통제용
+    has_dtr = int(dd["dtr"].notna().sum()) >= 200
+
+    if len(dd) < 200:
+        st.info("선택한 학습 연도에 습도 데이터가 충분하지 않습니다.")
+    else:
+        st.caption(f"분석에 사용한 데이터: {dd['date'].min().date()} ~ {dd['date'].max().date()} ({len(dd):,}일) — "
+                   "선택한 학습 연도 중 습도·기온·공급량이 모두 입력된 날만 사용합니다(습도가 비어 있는 연도는 자동 제외).")
+
+        # 난방기 = 난방 시작 기온(θ*, B 그래프와 같은 방식) 미만인 날
+        theta_h, _, _ = hinge_base_temp(dd["temp"].values, dd["Q"].values, 0.0, 20.0, 0.1)
+
+        # 기온 효과 제거: Poly-3 추정 대비 실적 차이(잔차, %)
+        m_h, pf_h, Xh = fit_poly3(dd["temp"].values, dd["Q"].values)
+        dd["Qhat"] = m_h.predict(Xh)
+        dd = dd[dd["Qhat"] > 0].copy()
+        dd["res_pct"] = (dd["Q"] - dd["Qhat"]) / dd["Qhat"] * 100.0
+        # 연도별 공급 수준 차이(고객 증가·설비 변화 등) 보정: 연도별 난방기 평균 잔차를 0으로 맞춤
+        yr_level = dd[dd["temp"] < theta_h].groupby("year")["res_pct"].mean()
+        dd["res_pct"] = dd["res_pct"] - dd["year"].map(yr_level).fillna(0.0)
+
+        # 난방기 데이터 + 같은 달 평균 대비 습도(%p): 월별 습도 차이를 제거하고 비교
+        heat_d = dd[dd["temp"] < theta_h].copy()
+        heat_d["hum_rel"] = heat_d["hum"] - heat_d.groupby("month")["hum"].transform("mean")
+        heat_d = heat_d[heat_d.groupby("month")["hum"].transform("size") >= 15].copy()
+
+        def ols_fit(Xm, y):
+            beta_, *_ = np.linalg.lstsq(Xm, y, rcond=None)
+            resid_ = y - Xm @ beta_
+            n_, p_ = Xm.shape
+            s2_ = float(resid_ @ resid_) / max(1, n_ - p_)
+            cov_ = s2_ * np.linalg.pinv(Xm.T @ Xm)
+            return beta_, np.sqrt(np.diag(cov_))
+
+        res_rows = []
+        for sname, months in HUM_SEASONS:
+            s_all = dd[dd["month"].isin(months)]
+            s_heat = heat_d[heat_d["month"].isin(months)]
+            r = dict(season=sname, n_heat=len(s_heat), hum_all=float(s_all["hum"].mean()) if len(s_all) else np.nan,
+                     hum_clear=np.nan, hum_cloudy=np.nan, dtr_thr=np.nan, eff=np.nan, ci=np.nan, mj=np.nan)
+            # 맑은 날 = 그 계절에서 일교차가 큰 상위 1/3, 흐림·비 = 하위 1/3
+            if has_dtr and s_all["dtr"].notna().sum() >= 60:
+                hi_thr, lo_thr = s_all["dtr"].quantile([2 / 3, 1 / 3]).values
+                r["hum_clear"] = float(s_all.loc[s_all["dtr"] >= hi_thr, "hum"].mean())
+                r["hum_cloudy"] = float(s_all.loc[s_all["dtr"] <= lo_thr, "hum"].mean())
+                r["dtr_thr"] = float(hi_thr)
+            # 습도 +10%p당 공급량 변화 (기온·주말 통제, 난방기만)
+            if len(s_heat) >= 60:
+                Xr = np.column_stack([np.ones(len(s_heat)), s_heat["temp"].values,
+                                      s_heat["weekend"].values, s_heat["hum_rel"].values / 10.0])
+                b_, se_ = ols_fit(Xr, s_heat["res_pct"].values)
+                r["eff"] = float(b_[3]); r["ci"] = 1.645 * float(se_[3])
+                r["mj"] = r["eff"] / 100.0 * float(s_heat["Q"].mean())
+            res_rows.append(r)
+
+        def _sig(r):
+            return np.isfinite(r["eff"]) and ((r["eff"] - r["ci"] > 0) or (r["eff"] + r["ci"] < 0))
+
+        def _proxy_ok(r):
+            return np.isfinite(r["hum_clear"]) and np.isfinite(r["hum_cloudy"]) and (r["hum_cloudy"] - r["hum_clear"] >= 5)
+
+        # ── 핵심 문장: 동절기 ───────────────────────────────
+        w = res_rows[0]
+        if np.isfinite(w["eff"]):
+            base_txt = (f"맑은 날 기준 평균습도는 약 {w['hum_clear']:.0f}%" if _proxy_ok(w)
+                        else f"평균습도(기준)는 약 {w['hum_all']:.0f}%")
+            if _sig(w):
+                direction = "많아집니다" if w["eff"] > 0 else "적어집니다"
+                st.success(f"**동절기(12~2월)** {base_txt}이고, 습도가 10%p 높아지면 공급량이 약 "
+                           f"**{abs(w['eff']):.2f}%** (하루 약 {abs(w['mj']):,.0f} MJ) {direction}.")
+            else:
+                st.info(f"**동절기(12~2월)** {base_txt}입니다. 습도가 높아질 때 공급량이 변하는지는 통계적으로 확인되지 않았습니다"
+                        f"(추정 {w['eff']:+.2f}%/10%p, 90% 신뢰구간 {w['eff'] - w['ci']:+.2f} ~ {w['eff'] + w['ci']:+.2f}%).")
+            if np.isfinite(w["hum_clear"]) and not _proxy_ok(w):
+                st.warning(f"동절기는 일교차로 맑은 날을 구분하기 어렵습니다(흐림·비 평균습도 − 맑은 날 평균습도 = "
+                           f"{w['hum_cloudy'] - w['hum_clear']:.1f}%p). 그래서 맑은 날 대신 동절기 평균습도를 기준으로 표시했습니다. "
+                           "습도 +10%p당 영향은 맑은 날 정의와 무관하게 계산되므로 그대로 유효합니다.")
+        else:
+            st.info("동절기 난방기 표본이 부족해 효과를 계산하지 못했습니다. 학습 연도를 더 선택해 보세요.")
+
+        # ── 계절별 요약표 ───────────────────────────────────
+        def _fmt(v, f):
+            return "-" if (v is None or not np.isfinite(v)) else format(v, f)
+
+        tbl_rows = []
+        for r in res_rows:
+            tbl_rows.append({
+                "계절": r["season"],
+                "난방기 일수": r["n_heat"],
+                "맑은 날 평균습도(%)": _fmt(r["hum_clear"], ".1f") + ("" if (_proxy_ok(r) or not np.isfinite(r["hum_clear"])) else " ※"),
+                "전체 평균습도(%)": _fmt(r["hum_all"], ".1f"),
+                "흐림·비 평균습도(%)": _fmt(r["hum_cloudy"], ".1f") + ("" if (_proxy_ok(r) or not np.isfinite(r["hum_cloudy"])) else " ※"),
+                "습도 +10%p → 공급량(%)": _fmt(r["eff"], "+.2f"),
+                "90% 신뢰구간(%)": "-" if not np.isfinite(r["eff"]) else f"{r['eff'] - r['ci']:+.2f} ~ {r['eff'] + r['ci']:+.2f}",
+                "일 환산(MJ/일)": _fmt(r["mj"], "+,.0f"),
+                "판정": "유의" if _sig(r) else ("확인 안 됨" if np.isfinite(r["eff"]) else "표본 부족"),
+            })
+        st.dataframe(pd.DataFrame(tbl_rows).set_index("계절"), use_container_width=True)
+        st.caption(f"방법: 난방기(평균기온 {theta_h:.1f}℃ 미만)만 사용 → 기온 효과는 Poly-3로 제거하고 연도별 공급 수준 차이도 보정 → 남은 공급량 차이를 "
+                   "'같은 달 평균보다 습도가 10%p 높은 날'로 비교(기온·주말 통제). "
+                   "맑은 날은 그 계절에서 일교차가 큰 상위 1/3인 날, 흐림·비는 하위 1/3인 날입니다. "
+                   "※ 표시는 맑은 날과 흐림·비의 평균습도 차이가 5%p 미만이라 구분이 어려운 계절입니다(이 경우 기준 습도는 계절 평균습도 사용).")
+
+        # ── 그래프: 계절별 습도 +10%p 효과 ─────────────────────
+        ok_rows = [r for r in res_rows if np.isfinite(r["eff"])]
+        if ok_rows:
+            fig_s = go.Figure(go.Bar(
+                x=[r["season"] for r in ok_rows], y=[r["eff"] for r in ok_rows],
+                error_y=dict(type="data", array=[r["ci"] for r in ok_rows], visible=True, color="#7F9CC0"),
+                marker_color=["#2B5FA8" if _sig(r) else "#A5CBF0" for r in ok_rows],
+                text=[f"{r['eff']:+.2f}%" for r in ok_rows], textposition="outside",
+                hovertemplate="%{x}<br>습도 +10%p당 %{y:+.2f}%<extra></extra>"))
+            fig_s.add_hline(y=0, line_dash="dash", line_color="#7F9CC0")
+            fig_s.update_layout(template="simple_white", bargap=0.5, font=dict(family=PLOT_FONT, size=13),
+                                margin=dict(l=40, r=20, t=30, b=40),
+                                yaxis=dict(title="습도 +10%p당 공급량 변화(%)", showgrid=True,
+                                           gridcolor="#E6EEF8", zeroline=False))
+            st.plotly_chart(fig_s, use_container_width=True, config={"displaylogo": False})
+            st.caption("진한 파랑 = 통계적으로 유의, 연한 파랑 = 확인 안 됨(신뢰구간이 0을 포함). 막대 위 선은 90% 신뢰구간입니다.")
+
+        # ── 기준 습도 대비 변화별 영향(동절기 포함 전 계절) ───────
+        sens = []
+        for r in res_rows:
+            if np.isfinite(r["eff"]):
+                row = {"계절": r["season"],
+                       "기준 습도(%)": _fmt(r["hum_clear"] if _proxy_ok(r) else r["hum_all"], ".0f")}
+                for dh in [-20, -10, 10, 20]:
+                    row[f"{dh:+d}%p"] = f"{r['eff'] * dh / 10.0:+.2f}%"
+                sens.append(row)
+        if sens:
+            st.markdown("**기준 습도 대비 습도가 변할 때 공급량 영향** (같은 기온 기준, 선형 가정)")
+            st.dataframe(pd.DataFrame(sens).set_index("계절"), use_container_width=True)
+
+        # ── 동절기: 비슷한 기온끼리 묶고 습도 구간별 공급량 비교 ───────
+        st.markdown("#### 동절기 — 같은 기온대에서 습도 구간별 공급량 비교 (평일 기준)")
+        wdf = dd[dd["month"].isin([12, 1, 2]) & (dd["temp"] < theta_h) & (dd["weekend"] == 0)].copy()
+        if len(wdf) < 60:
+            st.info("동절기 평일 난방기 표본이 부족해 기온대별 비교를 만들지 못했습니다.")
+        else:
+            e_lo = int(np.floor(wdf["temp"].quantile(0.02) / 2.0) * 2)
+            e_hi = int(np.ceil(wdf["temp"].quantile(0.98) / 2.0) * 2)
+            edges = np.arange(e_lo, e_hi + 2, 2)                      # 2℃ 간격 기온 구간
+            wdf = wdf[(wdf["temp"] >= edges[0]) & (wdf["temp"] < edges[-1])].copy()
+            wdf["t_bin"] = pd.cut(wdf["temp"], bins=edges, right=False)
+            H_LABELS = ["건조(50% 미만)", "보통(50~70%)", "습함(70% 이상)"]
+            wdf["h_bin"] = pd.cut(wdf["hum"], bins=[0, 50, 70, 101], labels=H_LABELS, right=False)
+            gw = wdf.groupby(["t_bin", "h_bin"], observed=False)["res_pct"].agg(["mean", "std", "count"]).unstack("h_bin")
+            MIN_N = 5
+
+            trows, chart_x, chart_y, chart_ci, chart_n, w_list, d_list = [], [], [], [], [], [], []
+            for tb in gw.index:
+                center = (tb.left + tb.right) / 2.0
+                q_center = float(poly3_predict(m_h, pf_h, [center])[0])      # 구간 중심 기온의 Poly-3 추정 공급량
+                row = {"기온 구간": f"{int(tb.left)}~{int(tb.right)}℃"}
+                vals, cnts, sds = {}, {}, {}
+                for hl in H_LABELS:
+                    n_c = int(gw[("count", hl)].get(tb, 0)) if ("count", hl) in gw.columns else 0
+                    m_c = gw[("mean", hl)].get(tb, np.nan) if ("mean", hl) in gw.columns else np.nan
+                    cnts[hl] = n_c
+                    sds[hl] = gw[("std", hl)].get(tb, np.nan) if ("std", hl) in gw.columns else np.nan
+                    vals[hl] = q_center * (1 + m_c / 100.0) if (n_c >= MIN_N and np.isfinite(m_c)) else np.nan
+                    row[hl.split("(")[0] + " (MJ)"] = "-" if not np.isfinite(vals[hl]) else f"{vals[hl]:,.0f}"
+                dry_v, wet_v = vals[H_LABELS[0]], vals[H_LABELS[2]]
+                if np.isfinite(dry_v) and np.isfinite(wet_v):
+                    dmj = wet_v - dry_v
+                    row["습함−건조 (MJ)"] = f"{dmj:+,.0f}"
+                    row["차이 (%)"] = f"{dmj / dry_v * 100:+.1f}%"
+                    nd, nw = cnts[H_LABELS[0]], cnts[H_LABELS[2]]
+                    w_list.append(nd * nw / (nd + nw)); d_list.append((dmj, dmj / dry_v * 100))
+                    chart_x.append(row["기온 구간"]); chart_y.append(dmj / dry_v * 100)
+                    sd_d, sd_w = sds[H_LABELS[0]], sds[H_LABELS[2]]
+                    chart_ci.append(1.645 * float(np.sqrt(sd_w ** 2 / nw + sd_d ** 2 / nd))
+                                    if (np.isfinite(sd_d) and np.isfinite(sd_w)) else 0.0)
+                    chart_n.append(nw)
+                else:
+                    row["습함−건조 (MJ)"] = "-"; row["차이 (%)"] = "-"
+                row["일수 (건/보/습)"] = f"{cnts[H_LABELS[0]]} / {cnts[H_LABELS[1]]} / {cnts[H_LABELS[2]]}"
+                trows.append(row)
+
+            if w_list:
+                w_arr = np.array(w_list)
+                avg_mj = float(np.sum(w_arr * np.array([d[0] for d in d_list])) / w_arr.sum())
+                avg_pc = float(np.sum(w_arr * np.array([d[1] for d in d_list])) / w_arr.sum())
+                hum_dry = float(wdf.loc[wdf["h_bin"] == H_LABELS[0], "hum"].mean())
+                hum_wet = float(wdf.loc[wdf["h_bin"] == H_LABELS[2], "hum"].mean())
+                st.success(f"동절기 같은 기온대에서 습도가 높은 날(평균 {hum_wet:.0f}%)은 낮은 날(평균 {hum_dry:.0f}%)보다 "
+                           f"공급량이 평균 **{avg_pc:+.1f}%** (하루 약 {avg_mj:+,.0f} MJ) 차이가 났습니다.")
+                fig_t = go.Figure(go.Bar(
+                    x=[f"{cx}<br>{cy:+.1f}%<br>(습함 {cn}일)" for cx, cy, cn in zip(chart_x, chart_y, chart_n)],
+                    y=chart_y, marker_color="#2B5FA8",
+                    error_y=dict(type="data", array=chart_ci, visible=True, color="#7F9CC0"),
+                    hovertemplate="%{y:+.2f}%<extra></extra>"))
+                fig_t.add_hline(y=0, line_color="#B8C7DA", line_width=1)
+                fig_t.add_hline(y=avg_pc, line_dash="dash", line_color="#1E3F7A", line_width=2,
+                                annotation_text=f"전체 평균 {avg_pc:+.1f}%", annotation_position="top left",
+                                annotation_font=dict(color="#1E3F7A", size=13))
+                fig_t.update_layout(template="simple_white", bargap=0.45, height=520, font=dict(family=PLOT_FONT, size=13),
+                                    margin=dict(l=40, r=20, t=30, b=40),
+                                    xaxis=dict(title="평균기온 구간"),
+                                    yaxis=dict(title="습함 − 건조 공급량 차이(%)", showgrid=True,
+                                               gridcolor="#E6EEF8", zeroline=False))
+                st.plotly_chart(fig_t, use_container_width=True, config={"displaylogo": False})
+            else:
+                st.info("건조·습함 구간을 함께 비교할 수 있는 기온 구간이 없습니다(구간별 5일 미만).")
+
+            st.dataframe(pd.DataFrame(trows).set_index("기온 구간"), use_container_width=True)
+            st.caption("막대 위 선은 90% 신뢰구간입니다. 습한 날 표본이 적은 구간은 선이 길어지며, 그 구간의 막대 높이는 우연일 수 있으니 점선(전체 평균)을 기준으로 보세요.")
+            st.caption(f"동절기 평일 난방기 사용 기간: {wdf['date'].min().date()} ~ {wdf['date'].max().date()} ({len(wdf):,}일). "
+                       "각 칸은 '12~2월 · 평일 · 해당 기온 구간 · 해당 습도 구간' 조건을 모두 만족하는 날만 세므로 일수가 많지 않을 수 있습니다.")
+            with st.expander("연도별 사용 일수 확인 (습도 데이터가 어느 해부터 쓰였는지)"):
+                base_yr = df[df["year"].isin(sel_years)].groupby("year").size()
+                hum_yr = df[df["year"].isin(sel_years)].dropna(subset=["hum"]).groupby("year").size()
+                use_yr = wdf.groupby("year").size()
+                yt = pd.DataFrame({"공급량·기온 있는 날": base_yr, "습도도 있는 날": hum_yr,
+                                   "동절기 평일 난방기(분석 사용)": use_yr}).fillna(0).astype(int)
+                yt["연도별 공급 수준(%)"] = yr_level.reindex(yt.index).round(1)
+                yt.index.name = "연도"
+                st.dataframe(yt, use_container_width=True)
+                st.caption("'습도도 있는 날'이 0이면 그 해는 습도 분석에 쓰이지 않습니다. '연도별 공급 수준'은 같은 기온 기준으로 "
+                           "전체 평균보다 그 해 공급량이 몇 % 높았는지를 나타내며, 분석에서는 이 차이를 제거했습니다.")
+            st.caption("12~2월 평일, 난방기 기준. 각 칸의 공급량은 '구간 중심 기온'에서의 Poly-3 추정값에 해당 습도 구간의 평균 잔차를 반영한 값이라, "
+                       "구간 안의 기온 차이가 섞이지 않습니다. 표본이 5일 미만인 칸은 '-'로 표시합니다. 공휴일은 별도로 제외하지 않았습니다.")
+
+        # ── 월별 평균 습도(참고) ─────────────────────────────
+        with st.expander("월별 평균 습도 (참고 기준)"):
+            hm = df[df["year"].isin(sel_years)].dropna(subset=["hum"]).groupby("month")["hum"].mean().reindex(range(1, 13))
+            figM = go.Figure(go.Bar(x=[f"{m}월" for m in hm.index], y=hm.values, marker_color="#5B93D3",
+                                    hovertemplate="%{x}<br>평균 습도=%{y:.1f}%<extra></extra>"))
+            figM.update_layout(template="simple_white", bargap=0.3, font=dict(family=PLOT_FONT, size=13),
+                               margin=dict(l=40, r=20, t=20, b=40),
+                               yaxis=dict(title="평균습도(%)", range=[0, 100], gridcolor="#E6EEF8"))
+            st.plotly_chart(figM, use_container_width=True, config={"displaylogo": False})
+
+        st.caption("습한 날은 흐림·비 날씨와 겹치기 쉬워, 위 영향에는 습도 자체의 효과와 일사량 부족의 효과가 함께 들어 있습니다.")
+
+        # ============================================================
+        # H-2. 비·눈이 온 날 vs 비 안 온 날(건조/보통/습함) — 같은 기온 기준 공급량 차이
+        # ============================================================
+        st.markdown("---")
+        st.markdown("#### ☔ H-2. 비·눈이 온 날과 안 온 날 비교 — 같은 기온에서 공급량이 얼마나 다른가")
+
+        RAIN_MM = 1.0   # 비 온 날 기준(mm). 이보다 적게 온 날(미량)은 비교에서 제외
+        pr = heat_d.dropna(subset=["rain", "snow"]).copy() if (rain_col and snow_col) else pd.DataFrame()
+
+        if rain_col is None or snow_col is None:
+            st.info("시트에서 '적설량', '강수량' 열을 찾지 못했습니다(L열 적설량, M열 강수량).")
+        elif len(pr) < 100:
+            st.info(f"강수량·적설량이 입력된 난방기 일수가 부족합니다(현재 {len(pr)}일). "
+                    "시트 입력이 끝난 뒤 사이드바의 '구글 시트 새로고침'을 눌러 주세요.")
+        else:
+            st.caption(f"강수·적설 자료가 있는 난방기 일수: {len(pr):,}일 ({pr['date'].min().date()} ~ {pr['date'].max().date()}). "
+                       "시트에 값이 더 입력되면 사이드바의 '구글 시트 새로고침'으로 바로 반영됩니다.")
+
+            # 구분: 눈(적설 있음) / 비(강수 1mm 이상) / 미량(제외) / 무강수 → 같은 달 안에서 습도 순위 3등분
+            pr["pgroup"] = np.where(pr["snow"] > 0, "눈",
+                             np.where(pr["rain"] >= RAIN_MM, "비",
+                             np.where(pr["rain"] > 0, "미량", "무강수")))
+            pr["grp"] = pr["pgroup"].where(pr["pgroup"].isin(["눈", "비"]))
+            dry_mask = pr["pgroup"] == "무강수"
+            pr.loc[dry_mask, "hq"] = pr[dry_mask].groupby("month")["hum"].rank(pct=True, method="first")
+            pr.loc[dry_mask & (pr["hq"] <= 1 / 3), "grp"] = "건조"
+            pr.loc[dry_mask & (pr["hq"] > 1 / 3) & (pr["hq"] <= 2 / 3), "grp"] = "보통"
+            pr.loc[dry_mask & (pr["hq"] > 2 / 3), "grp"] = "습함"
+
+            GROUPS = ["건조", "보통", "습함", "비", "눈"]
+            GROUP_DESC = {"건조": "건조 (비·눈 없음, 습도 하위 1/3)", "보통": "보통 (비·눈 없음, 습도 중간 1/3) ← 기준",
+                          "습함": "습함 (비·눈 없음, 습도 상위 1/3)", "비": f"비 ({RAIN_MM:g}mm 이상)", "눈": "눈 (적설 있음)"}
+            SEASON_COLOR = {"동절기 (12~2월)": "#1E3F7A", "간절기·봄 (3~4월)": "#5B93D3", "간절기·가을 (10~11월)": "#A5CBF0"}
+
+            eff_rows, tbl2 = [], []
+            for sname, months in HUM_SEASONS:
+                s = pr[pr["month"].isin(months) & pr["grp"].notna()]
+                if len(s) < 60 or int((s["grp"] == "보통").sum()) < 8:
+                    continue
+                present = [g for g in GROUPS if g != "보통" and int((s["grp"] == g).sum()) >= 8]
+                Xs = np.column_stack([np.ones(len(s)), s["temp"].values, s["weekend"].values] +
+                                     [(s["grp"] == g).astype(float).values for g in present])
+                b_, se_ = ols_fit(Xs, s["res_pct"].values)
+                qmean = float(s["Q"].mean())
+                for g in GROUPS:
+                    sg = s[s["grp"] == g]
+                    if len(sg) == 0:
+                        continue
+                    if g == "보통":
+                        e, c = 0.0, 0.0
+                    elif g in present:
+                        j = 3 + present.index(g)
+                        e, c = float(b_[j]), 1.645 * float(se_[j])
+                    else:
+                        e, c = np.nan, np.nan
+                    eff_rows.append(dict(season=sname, grp=g, n=len(sg), hum=float(sg["hum"].mean()),
+                                         temp=float(sg["temp"].mean()), eff=e, ci=c, mj=e / 100.0 * qmean if np.isfinite(e) else np.nan))
+
+            def _sig2(r):
+                return np.isfinite(r["eff"]) and r["grp"] != "보통" and ((r["eff"] - r["ci"] > 0) or (r["eff"] + r["ci"] < 0))
+
+            if not eff_rows:
+                st.info("계절별로 비교할 표본이 아직 부족합니다. 시트 입력이 더 진행된 뒤 새로고침해 주세요.")
+            else:
+                # ── 핵심 문장 ───────────────────────────────
+                st.markdown("**한눈에 보기** (같은 기온·주말 여부 기준, '보통' 날 대비 공급량 차이)")
+                for sname, _ in HUM_SEASONS:
+                    rs = {r["grp"]: r for r in eff_rows if r["season"] == sname}
+                    if not rs:
+                        continue
+                    def _t(g):
+                        r = rs.get(g)
+                        if r is None or not np.isfinite(r["eff"]):
+                            return None
+                        return f"{r['eff']:+.1f}%" + ("" if _sig2(r) else " (차이 확인 안 됨)")
+                    parts = []
+                    for g, label in [("비", "비 온 날"), ("눈", "눈 온 날"), ("습함", "비·눈 없이 습한 날"), ("건조", "건조한 날")]:
+                        t = _t(g)
+                        if t:
+                            parts.append(f"{label} {t}")
+                    st.markdown(f"- **{sname}**: " + " / ".join(parts))
+                    wet, prc = rs.get("습함"), [rs[g] for g in ("비", "눈") if g in rs and np.isfinite(rs[g]["eff"])]
+                    prc_sig = any(_sig2(r) and r["eff"] > 0 for r in prc)
+                    if wet is not None and np.isfinite(wet["eff"]) and _sig2(wet) and wet["eff"] > 0:
+                        st.caption("　→ 비·눈이 없어도 습한 날에는 공급량이 더 많습니다(습도 자체 또는 흐림·쌀쌀함의 영향).")
+                    elif prc_sig:
+                        st.caption("　→ 비·눈이 온 날에만 공급량이 더 많습니다. 습도 숫자보다 비·눈 날씨의 영향으로 보는 편이 맞습니다.")
+                    else:
+                        st.caption("　→ 비·눈 여부나 습도에 따른 뚜렷한 공급량 차이는 확인되지 않았습니다.")
+
+                # ── 표 ──────────────────────────────────────
+                for r in eff_rows:
+                    tbl2.append({
+                        "계절": r["season"], "구분": GROUP_DESC[r["grp"]], "일수": r["n"],
+                        "평균습도(%)": f"{r['hum']:.1f}", "평균기온(℃)": f"{r['temp']:.1f}",
+                        "보통 대비 공급량(%)": "기준" if r["grp"] == "보통" else ("-" if not np.isfinite(r["eff"]) else f"{r['eff']:+.2f}"),
+                        "90% 신뢰구간(%)": "-" if (r["grp"] == "보통" or not np.isfinite(r["eff"])) else f"{r['eff'] - r['ci']:+.2f} ~ {r['eff'] + r['ci']:+.2f}",
+                        "일 환산(MJ/일)": "-" if (r["grp"] == "보통" or not np.isfinite(r["mj"])) else f"{r['mj']:+,.0f}",
+                        "판정": "기준" if r["grp"] == "보통" else ("유의" if _sig2(r) else ("확인 안 됨" if np.isfinite(r["eff"]) else "표본 부족")),
+                    })
+                st.dataframe(pd.DataFrame(tbl2).set_index(["계절", "구분"]), use_container_width=True)
+
+                # ── 그래프 ──────────────────────────────────
+                fig_h2 = go.Figure()
+                for sname, _ in HUM_SEASONS:
+                    rr = [r for r in eff_rows if r["season"] == sname and np.isfinite(r["eff"])]
+                    if not rr:
+                        continue
+                    fig_h2.add_trace(go.Bar(
+                        name=sname, x=[r["grp"] for r in rr], y=[r["eff"] for r in rr],
+                        error_y=dict(type="data", array=[r["ci"] for r in rr], visible=True, color="#7F9CC0"),
+                        marker_color=SEASON_COLOR[sname],
+                        text=[("기준" if r["grp"] == "보통" else f"{r['eff']:+.1f}%") for r in rr], textposition="outside",
+                        customdata=[[r["n"]] for r in rr],
+                        hovertemplate=sname + "<br>%{x}: %{y:+.2f}% (n=%{customdata[0]}일)<extra></extra>"))
+                fig_h2.add_hline(y=0, line_dash="dash", line_color="#7F9CC0")
+                fig_h2.update_layout(template="simple_white", barmode="group", bargap=0.25, font=dict(family=PLOT_FONT, size=13),
+                                     margin=dict(l=40, r=20, t=30, b=40), legend=dict(orientation="h", y=1.1),
+                                     xaxis=dict(categoryorder="array", categoryarray=GROUPS),
+                                     yaxis=dict(title="'보통' 날 대비 공급량 차이(%)", showgrid=True, gridcolor="#E6EEF8", zeroline=False))
+                st.plotly_chart(fig_h2, use_container_width=True, config={"displaylogo": False})
+                st.caption("막대 위 선은 90% 신뢰구간입니다. 선이 0을 포함하면 차이가 확인되지 않은 것입니다. "
+                           "'건조·보통·습함'은 비·눈이 없던 날을 같은 달 안에서 습도 순위로 3등분한 것이고, 비·눈 온 날은 따로 구분했습니다.")
+
+                # ── 습도가 높은 날에 비·눈이 얼마나 몰려 있나 ─────────
+                st.markdown("**습도가 높은 날에는 비·눈이 얼마나 오나** (같은 달 안에서 습도 순위 3등분, 비·눈 온 날 비율)")
+                share_rows = []
+                for sname, months in HUM_SEASONS:
+                    s = pr[pr["month"].isin(months)].copy()
+                    if len(s) < 60:
+                        continue
+                    s["hq_all"] = s.groupby("month")["hum"].rank(pct=True, method="first")
+                    s["wet_day"] = ((s["snow"] > 0) | (s["rain"] >= RAIN_MM)).astype(float)
+                    row = {"계절": sname}
+                    for lab, lo, hi in [("습도 하위 1/3", 0, 1 / 3), ("습도 중간 1/3", 1 / 3, 2 / 3), ("습도 상위 1/3", 2 / 3, 1.0001)]:
+                        sub = s[(s["hq_all"] > lo) & (s["hq_all"] <= hi)]
+                        row[lab] = f"{sub['wet_day'].mean() * 100:.0f}% (평균습도 {sub['hum'].mean():.0f}%)" if len(sub) else "-"
+                    share_rows.append(row)
+                if share_rows:
+                    st.dataframe(pd.DataFrame(share_rows).set_index("계절"), use_container_width=True)
+                    st.caption("상위 1/3의 비·눈 비율이 높을수록, '습도가 높은 날'은 사실상 '비·눈이 오는 날'과 같은 의미입니다.")
+
+                st.caption(f"방법: 난방기(평균기온 {theta_h:.1f}℃ 미만)만 사용 → 기온 효과는 Poly-3로 제거하고 연도별 공급 수준 차이도 보정 → "
+                           "남은 차이를 '기온·주말 통제 후 보통 날 대비 %'로 계산. 눈이 온 날은 적설량이 있는 날, 비는 강수량 "
+                           f"{RAIN_MM:g}mm 이상(눈 없음)인 날이며, 그보다 적게 온 날(미량)은 비교에서 제외했습니다. 표본이 8일 미만인 구분은 표시하지 않습니다. "
+                           "이 결과는 과거 실적 해석용이며 예측에는 사용하지 않습니다.")
+
+# ============================================================
+# G. 기온분석 — 선택 월 히트맵(일자×연도) (수정됨: 상단 구글시트 데이터 공용사용)
+# ============================================================
+PLOT_FONT = "Noto Sans KR"
+
+st.subheader("🧊 G. 기온분석 — 일일 평균기온 히트맵")
+
+# 파일 업로드(옵션)가 없으면 위에서 읽어들인 구글시트(raw)를 그대로 사용
+u = st.file_uploader("히트맵용 파일 별도 업로드 (선택사항)", type=["xlsx"], key="g_daily_uploader")
+if u is not None:
+    dt_raw = pd.read_excel(u)
+else:
+    dt_raw = raw.copy() # 상단 구글 시트 데이터를 히트맵에도 동일하게 적용
+
+if dt_raw.empty:
+    st.warning("데이터가 없습니다.")
+    st.stop()
+
+def _guess_g(df: pd.DataFrame, keys, default=None):
+    for k in keys:
+        for c in df.columns:
+            if k in str(c):
+                return c
+    return default
+
+date_c  = _guess_g(dt_raw, ["일자","날짜","Date","date"], dt_raw.columns[0])
+tmean_c = _guess_g(dt_raw, ["평균기온","기온","Tmean","avg"], dt_raw.columns[1])
+
+dt = dt_raw.copy()
+dt["date"]  = pd.to_datetime(dt[date_c], errors="coerce")
+dt["tmean"] = pd.to_numeric(dt[tmean_c], errors="coerce")
+dt = dt.dropna(subset=["date","tmean"]).sort_values("date").reset_index(drop=True)
+dt["year"]  = dt["date"].dt.year
+dt["month"] = dt["date"].dt.month
+dt["day"]   = dt["date"].dt.day
+
+years_all = sorted(dt["year"].unique().tolist())
+y_min, y_max = int(min(years_all)), int(max(years_all))
+months_all = list(range(1,13))
+month_names = {1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
+               7:"July",8:"August",9:"September",10:"October",11:"November",12:"December"}
+
+def get_current_selection(dt: pd.DataFrame):
+    ys = sorted(dt["year"].unique().tolist())
+    y_min_l, y_max_l = int(min(ys)), int(max(ys))
+    sel_range = st.session_state.get("g_year_range", (y_min_l, y_max_l))
+    sel_month = st.session_state.get("g_month", int(dt["month"].iloc[-1]))
+    sel_years = [y for y in ys if sel_range[0] <= y <= sel_range[1]]
+    dsel = dt[(dt["year"].isin(sel_years)) & (dt["month"] == sel_month)].copy()
+    if dsel.empty:
+        return dsel, sel_years, sel_month, 0
+    if "day" not in dsel.columns:
+        dsel["day"] = dsel["date"].dt.day
+    try:
+        last_day = int(np.nanmax(dsel["day"].to_numpy()))
+    except Exception:
+        last_day = int(dsel["day"].max()) if not dsel.empty else 0
+    return dsel, sel_years, sel_month, last_day
+
+c1, c2 = st.columns([2,1])
+with c1:
+    st.slider("연도 범위", min_value=y_min, max_value=y_max,
+              value=(y_min, y_max), step=1, key="g_year_range")
+with c2:
+    default_month = int(dt["month"].iloc[-1])
+    st.selectbox("월 선택", options=months_all,
+                 index=months_all.index(default_month),
+                 format_func=lambda m: f"{m:02d} ({month_names[m]})",
+                 key="g_month")
+
+dsel, sel_years, sel_month, last_day = get_current_selection(dt)
+if dsel.empty or last_day == 0:
+    st.info("선택한 연·월에 데이터가 없습니다.")
+    st.stop()
+
+pivot = (dsel.pivot_table(index="day", columns="year", values="tmean", aggfunc="mean")
+                .reindex(range(1, last_day+1)))
+
+avg_row = pivot.mean(axis=0, skipna=True)
+pivot_with_avg = pd.concat([pivot, pd.DataFrame([avg_row], index=["평균"])])
+
+# y축 라벨: MM-DD + 마지막 "평균"
+y_labels = [f"{sel_month:02d}-{int(d):02d}" for d in pivot.index]
+y_labels.append("평균")
+pivot_with_avg.index = y_labels
+
+# x축 연도 문자열
+pivot_with_avg.columns = [str(c) for c in pivot_with_avg.columns]
+
+# 행 수 기반 높이 (참고 코드와 동일 방식)
+n_rows = len(pivot_with_avg)
+height = max(800, n_rows * 28 + 120)
+
+# px.imshow — 참고 코드와 동일한 렌더링 방식
+heat = px.imshow(
+    pivot_with_avg,
+    labels=dict(x="연도", y="일", color="평균기온(℃)"),
+    x=pivot_with_avg.columns.tolist(),
+    y=pivot_with_avg.index.tolist(),
+    color_continuous_scale="RdBu_r",
+    aspect="auto",
+    text_auto=".1f",
+)
+
+heat.update_layout(
+    height=height,
+    margin=dict(l=40, r=40, t=80, b=40),
+    title=f"{sel_month:02d}월 일일 평균기온 히트맵 (선택연도 {len(pivot_with_avg.columns)}개)",
+    font=dict(family=PLOT_FONT, size=13),
+    yaxis=dict(
+        type="category",
+        tickmode="linear",
+        dtick=1,
+        autorange="reversed",
+    ),
+    xaxis=dict(
+        type="category",
+        tickmode="linear",
+        dtick=1,
+        side="top",       # x축(연도) 상단
+    ),
+)
+heat.update_traces(textfont=dict(size=12))
+
+st.plotly_chart(heat, use_container_width=True, config={"displaylogo": False})
