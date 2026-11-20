@@ -826,11 +826,62 @@ else:
             row["90% 신뢰구간(%)"] = "-" if not np.isfinite(eff) else f"{eff - ci:+.2f} ~ {eff + ci:+.2f}"
             row["판정"] = "유의미" if _sig(eff, ci) else ("확인 안 됨" if np.isfinite(eff) else "표본 부족")
             sum_rows.append(row)
-            sum_eff.append(dict(season=sname, eff=eff, ci=ci, hum=hum_all))
+            sum_eff.append(dict(season=sname, eff=eff, ci=ci, hum=hum_all, hum_dry=hum_dry, hum_wet=hum_wet))
 
         # ============================================================
         # 표시 1) 습도 +10%p당 공급량 변화 (평균습도 함께 표시) — 가장 먼저
         # ============================================================
+        # ============================================================
+        # 표시 0) 비·눈이 오면 습도가 얼마나 오르고, 공급량은 얼마나 늘어나나 (가장 상단)
+        # ============================================================
+        st.markdown("##### 비·눈이 오면 습도는 얼마나 오르고, 공급량은 얼마나 늘까")
+        gap_rows = []
+        for r in sum_eff:
+            if not (np.isfinite(r["hum_dry"]) and np.isfinite(r["hum_wet"])):
+                continue
+            e_pr = [x for x in eff_rows if x["season"] == r["season"] and x["grp"] == "비·눈" and np.isfinite(x["eff"])]
+            if not e_pr:
+                continue
+            gap = r["hum_wet"] - r["hum_dry"]
+            gap_rows.append(dict(season=r["season"], dry=r["hum_dry"], wet=r["hum_wet"], gap=gap,
+                                 eff_pr=e_pr[0]["eff"], ci_pr=e_pr[0]["ci"],
+                                 eff_10=(r["eff"] * gap / 10.0) if np.isfinite(r["eff"]) else np.nan))
+        if gap_rows:
+            figG = go.Figure()
+            cats = [g["season"] for g in gap_rows]
+            figG.add_trace(go.Bar(
+                x=cats, y=[g["dry"] for g in gap_rows], width=0.34, marker_color=C_BLUE, marker_line_width=0,
+                text=[f"평균습도 {g['dry']:.0f}%" for g in gap_rows], textposition="inside",
+                insidetextanchor="end", textfont=dict(color="white", size=13),
+                hovertemplate="%{x}<br>비·눈 없는 날 평균습도 %{y:.1f}%<extra></extra>"))
+            figG.add_trace(go.Scatter(
+                x=cats, y=[g["wet"] for g in gap_rows], mode="markers+text",
+                marker=dict(symbol="line-ew", size=64, line=dict(color=C_NAVY, width=3)),
+                text=[f"비·눈 온 날 {g['wet']:.0f}%" for g in gap_rows], textposition="top center",
+                textfont=dict(color=C_NAVY, size=13),
+                hovertemplate="%{x}<br>비·눈 온 날 평균습도 %{y:.1f}%<extra></extra>"))
+            for i, g in enumerate(gap_rows):
+                figG.add_shape(type="line", x0=i, x1=i, y0=g["dry"] + 1.5, y1=g["wet"] - 1.5,
+                               line=dict(color=C_ERR, width=2, dash="dot"))
+                figG.add_annotation(x=i, y=g["wet"] - 1.5, ax=i, ay=g["wet"] - 6, xref="x", yref="y", axref="x", ayref="y",
+                                    showarrow=True, arrowhead=2, arrowsize=1.2, arrowwidth=2, arrowcolor=C_ERR, text="")
+                sig_txt = "" if _sig(g["eff_pr"], g["ci_pr"]) else " (확인 안 됨)"
+                figG.add_annotation(x=i + 0.06, y=(g["dry"] + g["wet"]) / 2, xref="x", yref="y", xanchor="left", showarrow=False,
+                                    align="left", font=dict(color=C_TXT, size=13),
+                                    text=f"<b>{g['gap']:.0f}%p GAP</b><br>공급량 <b>{g['eff_pr']:+.1f}%</b> 증가{sig_txt}")
+            figG.update_layout(template="simple_white", showlegend=False, font=dict(family=H_FONT, size=13, color=C_TXT),
+                               margin=dict(l=40, r=20, t=20, b=40), bargap=0.3,
+                               xaxis=dict(range=[-0.6, len(gap_rows) - 0.4]),
+                               yaxis=dict(title="평균 습도(%)", range=[0, 100], gridcolor=C_GRID))
+            st.plotly_chart(figG, use_container_width=True, config={"displaylogo": False})
+            st.caption("막대 = 비·눈이 없던 날(월~금)의 평균습도, 가로 눈금 = 비·눈이 온 날의 평균습도, 점선 화살표 = 습도 차이(GAP, %p). "
+                       "'공급량 +N% 증가'는 같은 기온의 '보통' 날과 비교해 실제로 관측된 비·눈 온 날의 공급량 차이입니다. "
+                       "참고로 '습도 +10%p당 효과 × GAP'로 환산하면 "
+                       + " / ".join(f"{g['season'].split(' ')[0]} {g['eff_10']:+.1f}%" for g in gap_rows if np.isfinite(g["eff_10"]))
+                       + " 로, 실제 비·눈 효과보다 작습니다. 비·눈 날에는 습도 외에 눈·비 자체(체감온도, 난방 사용 행태)의 영향이 함께 들어 있기 때문입니다.")
+        else:
+            st.info("비·눈 온 날과 안 온 날의 습도 비교는 강수·적설 자료가 충분히 채워진 뒤 표시됩니다.")
+
         st.markdown("##### 1) 습도가 10%p 높을 때 공급량은 얼마나 달라지나")
         ok_rows = [r for r in sum_eff if np.isfinite(r["eff"])]
         if ok_rows:
