@@ -792,6 +792,42 @@ else:
                                          temp=float(sg["temp"].mean()), eff=e, ci=c,
                                          mj=e / 100.0 * qmean if np.isfinite(e) else np.nan))
 
+        # ── 계산 ①-b 확인용: 기온 1℃ 구간 안에서 직접 비교 (회귀식 없이) ─────────
+        MATCH_BIN = 1.0
+        match_rows = []
+        if use_pr:
+            _rng = np.random.default_rng(7)
+            for sname, months in HUM_SEASONS:
+                s_ = pr[pr["month"].isin(months) & pr["grp"].isin(["비·눈", "보통"])].copy()
+                if len(s_) < 40:
+                    continue
+                s_["Qa"] = s_["Q"] / (1.0 + s_["year"].map(yr_level).fillna(0.0) / 100.0)
+                s_["bin"] = np.floor(s_["temp"] / MATCH_BIN).astype(int)
+
+                def _att(w, c):
+                    num = den = 0.0
+                    for b_, gw in w.groupby("bin"):
+                        gc = c[c["bin"] == b_]
+                        if len(gc) < 2:
+                            continue
+                        num += len(gw) * (gw["Qa"].mean() / gc["Qa"].mean() - 1.0)
+                        den += len(gw)
+                    return (num / den * 100.0 if den > 0 else np.nan), den
+
+                w0, c0 = s_[s_["grp"] == "비·눈"], s_[s_["grp"] == "보통"]
+                est, n_used = _att(w0, c0)
+                if not np.isfinite(est) or n_used < 10:
+                    continue
+                bs = []
+                for _ in range(300):
+                    wb = w0.iloc[_rng.integers(0, len(w0), len(w0))]
+                    cb = c0.iloc[_rng.integers(0, len(c0), len(c0))]
+                    v, _n = _att(wb, cb)
+                    if np.isfinite(v):
+                        bs.append(v)
+                lo, hi = (np.percentile(bs, 5), np.percentile(bs, 95)) if len(bs) > 50 else (np.nan, np.nan)
+                match_rows.append(dict(season=sname, n_wet=len(w0), n_used=int(n_used), est=float(est), lo=float(lo), hi=float(hi)))
+
         # ── 계산 ② 계절별 요약: 습도 +10%p당 영향 + 평균습도 ─────────
         sum_rows, sum_eff = [], []
         for sname, months in HUM_SEASONS:
@@ -848,34 +884,40 @@ else:
                                  eff_10=(r["eff"] * gap / 10.0) if np.isfinite(r["eff"]) else np.nan))
         if gap_rows:
             figG = go.Figure()
-            cats = [g["season"] for g in gap_rows]
-            figG.add_trace(go.Bar(
-                x=cats, y=[g["dry"] for g in gap_rows], width=0.34, marker_color=C_BLUE, marker_line_width=0,
-                text=[f"평균습도 {g['dry']:.1f}%" for g in gap_rows], textposition="inside",
-                insidetextanchor="end", textfont=dict(color="white", size=13),
-                hovertemplate="%{x}<br>비·눈 없는 날 평균습도 %{y:.1f}%<extra></extra>"))
+            n_g = len(gap_rows)
+            ylab = [g["season"] for g in gap_rows]
+            for g in gap_rows:
+                figG.add_trace(go.Scatter(x=[g["dry"], g["wet"]], y=[g["season"]] * 2, mode="lines", hoverinfo="skip",
+                                          line=dict(color=C_PALE, width=14)))
             figG.add_trace(go.Scatter(
-                x=cats, y=[g["wet"] for g in gap_rows], mode="markers+text",
-                marker=dict(symbol="line-ew", size=64, line=dict(color=C_NAVY, width=3)),
-                text=[f"비·눈 온 날 {g['wet']:.1f}%" for g in gap_rows], textposition="top center",
-                textfont=dict(color=C_NAVY, size=13),
-                hovertemplate="%{x}<br>비·눈 온 날 평균습도 %{y:.1f}%<extra></extra>"))
-            for i, g in enumerate(gap_rows):
-                figG.add_shape(type="line", x0=i, x1=i, y0=g["dry"] + 1.5, y1=g["wet"] - 1.5,
-                               line=dict(color=C_ERR, width=2, dash="dot"))
-                figG.add_annotation(x=i, y=g["wet"] - 1.5, ax=i, ay=g["wet"] - 6, xref="x", yref="y", axref="x", ayref="y",
-                                    showarrow=True, arrowhead=2, arrowsize=1.2, arrowwidth=2, arrowcolor=C_ERR, text="")
-                sig_txt = "" if _sig(g["eff_pr"], g["ci_pr"]) else " (확인 안 됨)"
-                figG.add_annotation(x=i + 0.06, y=(g["dry"] + g["wet"]) / 2, xref="x", yref="y", xanchor="left", showarrow=False,
-                                    align="left", font=dict(color=C_TXT, size=13),
-                                    text=f"<b>{g['gap']:.1f}%p GAP</b><br>공급량 <b>{g['eff_pr']:+.1f}%</b> 증가{sig_txt}")
-            figG.update_layout(template="simple_white", showlegend=False, font=dict(family=H_FONT, size=13, color=C_TXT),
-                               margin=dict(l=40, r=20, t=20, b=40), bargap=0.3,
-                               xaxis=dict(range=[-0.6, len(gap_rows) - 0.4]),
-                               yaxis=dict(title="평균 습도(%)", range=[0, 100], gridcolor=C_GRID))
+                x=[g["dry"] for g in gap_rows], y=ylab, mode="markers+text", name="비·눈 없는 날",
+                marker=dict(size=22, color=C_SKY, line=dict(color="white", width=2)),
+                text=[f"{g['dry']:.1f}%" for g in gap_rows], textposition="bottom center", textfont=dict(color=C_TXT, size=13),
+                hovertemplate="%{y}<br>비·눈 없는 날 평균습도 %{x:.1f}%<extra></extra>"))
+            figG.add_trace(go.Scatter(
+                x=[g["wet"] for g in gap_rows], y=ylab, mode="markers+text", name="비·눈 온 날",
+                marker=dict(size=22, color=C_NAVY, line=dict(color="white", width=2)),
+                text=[f"{g['wet']:.1f}%" for g in gap_rows], textposition="bottom center", textfont=dict(color=C_NAVY, size=13),
+                hovertemplate="%{y}<br>비·눈 온 날 평균습도 %{x:.1f}%<extra></extra>"))
+            for g in gap_rows:
+                sig_ = _sig(g["eff_pr"], g["ci_pr"])
+                figG.add_annotation(x=(g["dry"] + g["wet"]) / 2, y=g["season"], yshift=26, showarrow=False,
+                                    text=f"습도 +{g['gap']:.1f}%p", font=dict(color=C_TXT, size=13))
+                figG.add_annotation(xref="paper", x=1.02, xanchor="left", y=g["season"], showarrow=False, align="center",
+                                    text=("공급량<br><b style='font-size:18px'>" + f"{g['eff_pr']:+.1f}%</b>"
+                                          + ("" if sig_ else "<br><span style='font-size:11px'>확인 안 됨</span>")),
+                                    font=dict(color=("white" if sig_ else C_TXT)),
+                                    bgcolor=(C_BLUE if sig_ else "#EEF3F9"), bordercolor=(C_BLUE if sig_ else C_PALE),
+                                    borderwidth=1, borderpad=8)
+            figG.update_layout(template="simple_white", showlegend=True, height=120 + 110 * n_g,
+                               font=dict(family=H_FONT, size=13, color=C_TXT),
+                               legend=dict(orientation="h", y=1.12, x=0),
+                               margin=dict(l=20, r=120, t=40, b=40),
+                               xaxis=dict(title="평균 습도(%)", range=[20, 100], gridcolor=C_GRID, showgrid=True),
+                               yaxis=dict(autorange="reversed", showgrid=False, title=""))
             st.plotly_chart(figG, use_container_width=True, config={"displaylogo": False})
-            st.caption("막대 = 비·눈이 없던 날(월∼금)의 평균습도, 가로 눈금 = 비·눈이 온 날의 평균습도, 점선 화살표 = 습도 차이(GAP, %p). "
-                       "'공급량 +N% 증가'는 같은 기온의 '보통' 날과 비교해 실제로 관측된 비·눈 온 날의 공급량 차이입니다. "
+            st.caption("연한 점 = 비·눈이 없던 날(월∼금)의 평균습도, 진한 점 = 비·눈이 온 날의 평균습도, 두 점 사이 = 습도 차이(%p). "
+                       "오른쪽 '공급량 +N%'는 같은 기온의 '보통' 날과 비교해 실제로 관측된 비·눈 온 날의 공급량 차이입니다. "
                        "습도는 소수 첫째 자리까지 계산한 값이라 반올림한 숫자끼리 빼면 0.1 정도 달라 보일 수 있습니다.")
         else:
             st.info("비·눈 온 날과 안 온 날의 습도 비교는 강수·적설 자료가 충분히 채워진 뒤 표시됩니다.")
@@ -939,6 +981,16 @@ else:
             st.caption("막대 위아래의 가는 세로선은 90% 신뢰구간(오차 범위)입니다. 선이 0을 포함하면 차이가 확인되지 않은 것입니다. "
                        "'건조·습함'은 비·눈이 없던 날을 같은 달 안에서 습도 순위로 3등분한 것이고, 비·눈 온 날은 따로 구분했습니다.")
 
+            if match_rows:
+                st.markdown("**확인: 기온이 1℃ 이내로 같은 날끼리 직접 비교 (회귀식 없이)**")
+                st.dataframe(pd.DataFrame([{
+                    "계절": r["season"], "비·눈 온 날(일)": r["n_wet"], "비교에 쓴 일수": r["n_used"],
+                    "같은 기온 '보통' 날 대비 공급량(%)": f"{r['est']:+.1f}",
+                    "90% 범위(%)": f"{r['lo']:+.1f} ∼ {r['hi']:+.1f}",
+                    "판정": "차이 확인" if (r["lo"] > 0 or r["hi"] < 0) else "확인 안 됨"} for r in match_rows]).set_index("계절"),
+                    use_container_width=True)
+                st.caption("각 1℃ 기온 구간(예: 20.0~20.9℃) 안에서 비·눈 온 날과 '보통' 날의 공급량을 직접 비교해 평균낸 값입니다. "
+                           "위 그래프(회귀식 기반)와 부호·크기가 비슷하면 결과가 믿을 만하고, 다르면 일수가 적거나 기온 분포가 달라서일 수 있습니다.")
             with st.expander("상세 수치 보기 (일수·평균습도·신뢰구간)"):
                 t2 = []
                 for r in eff_rows:
