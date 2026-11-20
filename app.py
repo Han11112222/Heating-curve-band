@@ -944,14 +944,23 @@ else:
                     marker_color=SEASON_COLOR[sname], marker_line_width=0,
                     customdata=[[r["n"]] for r in rr],
                     hovertemplate=sname + "<br>%{x}: %{y:+.2f}% (n=%{customdata[0]}일)<extra></extra>"))
-                # 숫자는 오차선 바깥(위·아래 끝)에 따로 표시해 선과 겹치지 않게 함
+                # 숫자는 막대의 위·아래 끝(값의 위치)에 표시. 오차선과 겹치는 부분은 글자 배경으로 가림
                 _k = [n_ for n_, (sn_, _m) in enumerate(HUM_SEASONS) if sn_ == sname][0]
                 for r in rr:
                     _xc = SHOW.index(r["grp"]) + (_k - (len(HUM_SEASONS) - 1) / 2.0) * ((1.0 - 0.3) / len(HUM_SEASONS))
                     _up = r["eff"] >= 0
-                    fig_h2.add_annotation(x=_xc, xref="x", y=(r["eff"] + r["ci"]) if _up else (r["eff"] - r["ci"]), yref="y",
-                                          yshift=12 if _up else -12, showarrow=False, text=f"<b>{r['eff']:+.1f}%</b>",
-                                          font=dict(color=C_TXT, size=13))
+                    _col = SEASON_COLOR[sname]
+                    _inside = abs(r["eff"]) >= 1.2                  # 막대가 충분히 크면 막대 끝 안쪽, 작으면 바깥쪽
+                    if _inside:
+                        _ys = -14 if _up else 14
+                        _fc = "white" if _col != C_SKY else C_TXT
+                        _bg = _col
+                    else:
+                        _ys = 14 if _up else -14
+                        _fc, _bg = C_TXT, "rgba(255,255,255,0.85)"
+                    fig_h2.add_annotation(x=_xc, xref="x", y=r["eff"], yref="y", yshift=_ys, showarrow=False,
+                                          text=f"<b>{r['eff']:+.1f}%</b>", font=dict(color=_fc, size=13),
+                                          bgcolor=_bg, borderpad=2)
             fig_h2.add_hline(y=0, line_dash="dash", line_color=C_ERR)
             if "비·눈" in SHOW and any(r["season"].startswith("동절기") and r["grp"] == "비·눈" and np.isfinite(r["eff"]) for r in eff_rows):
                 _ix = SHOW.index("비·눈")
