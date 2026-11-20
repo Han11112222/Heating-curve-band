@@ -834,7 +834,7 @@ else:
         # ============================================================
         # 표시 0) 비·눈이 오면 습도가 얼마나 오르고, 공급량은 얼마나 늘어나나 (가장 상단)
         # ============================================================
-        st.markdown("##### 비·눈이 오면 습도는 얼마나 오르고, 공급량은 얼마나 늘까")
+        st.markdown("##### 1) 비·눈이 오면 습도는 얼마나 오르고, 공급량은 얼마나 늘까")
         gap_rows = []
         for r in sum_eff:
             if not (np.isfinite(r["hum_dry"]) and np.isfinite(r["hum_wet"])):
@@ -879,51 +879,6 @@ else:
                        "습도는 소수 첫째 자리까지 계산한 값이라 반올림한 숫자끼리 빼면 0.1 정도 달라 보일 수 있습니다.")
         else:
             st.info("비·눈 온 날과 안 온 날의 습도 비교는 강수·적설 자료가 충분히 채워진 뒤 표시됩니다.")
-
-        st.markdown("##### 1) 습도가 10%p 높을 때 공급량은 얼마나 달라지나")
-        ok_rows = [r for r in sum_eff if np.isfinite(r["eff"])]
-        if ok_rows:
-            fig_s = go.Figure(go.Bar(
-                x=[f"{r['season']}<br><span style='font-size:12px'>평균습도 {r['hum']:.0f}%</span>" for r in ok_rows],
-                y=[r["eff"] for r in ok_rows],
-                error_y=dict(type="data", array=[r["ci"] for r in ok_rows], visible=True, color=C_ERR, thickness=1.5, width=6),
-                marker_color=[C_BLUE if _sig(r["eff"], r["ci"]) else C_PALE for r in ok_rows],
-                marker_line_width=0,
-                text=[f"{r['eff']:+.2f}%" for r in ok_rows], textposition="outside", textfont=dict(color=C_TXT),
-                customdata=[[r["hum"]] for r in ok_rows],
-                hovertemplate="%{x}<br>습도 +10%p당 %{y:+.2f}%<extra></extra>"))
-            fig_s.add_hline(y=0, line_dash="dash", line_color=C_ERR)
-            fig_s.update_layout(template="simple_white", bargap=0.5, font=dict(family=H_FONT, size=13, color=C_TXT),
-                                margin=dict(l=40, r=20, t=30, b=40),
-                                yaxis=dict(title="습도 +10%p당 공급량 변화(%)", showgrid=True,
-                                           gridcolor=C_GRID, zeroline=False))
-            st.plotly_chart(fig_s, use_container_width=True, config={"displaylogo": False})
-            st.caption("진한 파랑 = 통계적으로 유의미, 연한 파랑 = 확인 안 됨(신뢰구간이 0을 포함). 막대 위아래의 가는 세로선은 90% 신뢰구간(오차 범위)입니다. "
-                       "x축 아래 '평균습도'는 그 계절 월∼금의 평균습도입니다. "
-                       + ("비·눈이 전혀 없던 날끼리 비교한 값입니다." if use_pr else "강수 자료가 없어 전체 난방기 기준입니다."))
-        else:
-            st.info("계절별 습도 효과를 계산할 표본이 부족합니다.")
-
-        if gap_rows:
-            _w = next((g for g in gap_rows if g["season"].startswith("동절기")), gap_rows[0])
-            _e10 = next((r["eff"] for r in sum_eff if r["season"] == _w["season"]), np.nan)
-            if np.isfinite(_e10):
-                st.markdown(
-                    f"**읽는 법 ({_w['season'].split(' ')[0]} 예시)** — 비·눈이 없던 날에서 습도가 10%p 높을 때 공급량은 **{_e10:+.2f}%** 늘었습니다. "
-                    f"비·눈 온 날은 습도가 {_w['gap']:.1f}%p 더 높으므로 습도 몫은 "
-                    f"{_e10:+.2f}% × ({_w['gap']:.1f} ÷ 10) ≈ **{_w['eff_10']:+.1f}%** 입니다. "
-                    f"실제 비·눈 온 날은 **{_w['eff_pr']:+.1f}%** 늘었으므로, 나머지 **{_w['eff_pr'] - _w['eff_10']:+.1f}%**는 "
-                    "습도가 아니라 눈·비 자체(체감온도, 난방 사용 행태 등)의 영향으로 볼 수 있습니다.")
-            st.dataframe(pd.DataFrame([{
-                "계절": g["season"],
-                "습도 +10%p당(%)": _fmt(next((r["eff"] for r in sum_eff if r["season"] == g["season"]), np.nan), "+.2f"),
-                "비·눈 날 습도 차이(%p)": f"{g['gap']:.1f}",
-                "① 습도 몫(%)": _fmt(g["eff_10"], "+.1f"),
-                "② 실제 비·눈 효과(%)": f"{g['eff_pr']:+.1f}",
-                "③ 눈·비 자체 등(②−①)(%)": _fmt(g["eff_pr"] - g["eff_10"], "+.1f")} for g in gap_rows]).set_index("계절"),
-                use_container_width=True)
-            st.caption("보고에는 ② 실제 비·눈 효과를 쓰고, ①은 '그중 습도 차이로 설명되는 부분'으로 곁들이면 됩니다. "
-                       "봄·가을은 습도 효과의 방향이 계절마다 달라 해석에 주의가 필요합니다.")
 
         # 월별 평균 습도 (바로 아래)
         hm = df[df["year"].isin(H_SEL_YEARS)].dropna(subset=["hum"]).groupby("month")["hum"].mean().reindex(range(1, 13))
@@ -1002,7 +957,11 @@ else:
         # 표시 3) 계절별 요약표
         # ============================================================
         st.markdown("##### 3) 계절별 요약")
-        st.dataframe(pd.DataFrame(sum_rows).set_index("계절"), use_container_width=True)
+        _df_sum = pd.DataFrame(sum_rows).set_index("계절")
+        _simple_cols = [c for c in _df_sum.columns if not (c.startswith("습도 +10%p") or c.startswith("90%") or c == "판정")]
+        st.dataframe(_df_sum[_simple_cols], use_container_width=True)
+        with st.expander("참고(상세): 습도 +10%p당 공급량 변화 — 보고용 아님"):
+            st.dataframe(_df_sum, use_container_width=True)
         st.caption("습도 +10%p는 '같은 달 평균보다 습도가 10%p 높은 날'을 뜻합니다. 비·눈이 있었던 날을 빼고(강수 자료가 있을 때) "
                    "기온이 같은 월∼금끼리 비교했기 때문에, 비·눈 효과가 섞이지 않은 습도 차이만 남습니다. "
                    "'유의미'는 90% 신뢰구간이 0을 포함하지 않는다는 뜻이며 차이가 크다는 뜻은 아닙니다.")
