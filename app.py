@@ -1036,27 +1036,28 @@ else:
                                        yaxis=dict(title="봄 비·눈 온 날 공급량 차이(%)", gridcolor=C_GRID, zeroline=False))
                     st.plotly_chart(figE, use_container_width=True, config={"displaylogo": False})
                 st.markdown(
-                    "<div style='font-size:18px; line-height:1.85; padding:14px 18px; margin:6px 0 14px 0; "
+                    "<div style='font-size:18px; line-height:2.0; padding:14px 18px; margin:6px 0 14px 0; "
                     "border-left:4px solid #16427A; background:#F3F8FD; border-radius:6px; color:#1F3A5C'>"
-                    f"봄에 비가 오면 낮 기온이 덜 오르고 밤 기온은 덜 내려가 <b>일교차가 {sp['w_max'] - sp['w_min']:.1f}℃</b>로, "
-                    f"맑은 날({sp['d_max'] - sp['d_min']:.1f}℃)의 약 절반입니다. 하루 평균기온이 비슷해도 일교차가 작은 날은 "
-                    f"공급량이 낮게 나오는 경향이 있어, 같은 평균기온끼리만 비교하면 비 오는 날이 <b>{sp['raw']:+.1f}%</b> 적게 보입니다. "
-                    f"일교차까지 같게 맞추면 <b>{sp['adj']:+.1f}%</b>로 사실상 차이가 없습니다. "
-                    "즉, 비 때문에 공급량이 줄어든 것이 아니라 <b>일교차가 작아서</b> 줄어 보이는 것입니다."
+                    f"봄에 비가 오면 낮 기온이 덜 오르고 밤 기온은 덜 내려가 <b>일교차가 {sp['w_max'] - sp['w_min']:.1f}℃</b>로, 맑은 날({sp['d_max'] - sp['d_min']:.1f}℃)의 약 절반입니다.<br>"
+                    "하루 평균기온이 비슷해도 일교차가 작은 날은 공급량이 낮게 나오는 경향이 있습니다.<br>"
+                    f"그래서 같은 평균기온끼리만 비교하면 비 오는 날의 공급량이 <b>{sp['raw']:+.1f}%</b>로 낮게 보입니다.<br>"
+                    f"일교차까지 같게 맞추면 <b>{sp['adj']:+.1f}%</b>로 사실상 차이가 없습니다.<br>"
+                    "즉, 비 때문에 줄어든 것이 아니라 <b>일교차가 작아서</b> 줄어 보이는 것입니다."
                     "</div>", unsafe_allow_html=True)
-                st.caption("막대는 그날들의 평균 최저∼평균 최고 기온, 막대 안의 흰 선은 하루 평균기온입니다. 일교차 보정은 최고·최저기온 차이를 함께 맞춰 다시 계산한 값입니다. "
+                st.caption("막대는 그날들의 평균 최저∼평균 최고 기온, 막대 안의 흰 선은 하루 평균기온입니다.  \n"
+                           "일교차 보정은 최고·최저기온 차이를 함께 맞춰 다시 계산한 값입니다.  \n"
                            "원인 해석(아침이 추운 날에 난방이 몰림 등)은 추정이며, 구름양·공휴일 등은 통제하지 못했습니다.")
 
             if match_rows:
-                st.markdown("**확인: 기온이 1℃ 이내로 같은 날끼리 직접 비교 (회귀식 없이)**")
-                st.dataframe(pd.DataFrame([{
-                    "계절": r["season"], "비·눈 온 날(일)": r["n_wet"], "비교에 쓴 일수": r["n_used"],
-                    "같은 기온 '보통' 날 대비 공급량(%)": f"{r['est']:+.1f}",
-                    "90% 범위(%)": f"{r['lo']:+.1f} ∼ {r['hi']:+.1f}",
-                    "판정": "차이 확인" if (r["lo"] > 0 or r["hi"] < 0) else "확인 안 됨"} for r in match_rows]).set_index("계절"),
-                    use_container_width=True)
-                st.caption("각 1℃ 기온 구간(예: 20.0~20.9℃) 안에서 비·눈 온 날과 '보통' 날의 공급량을 직접 비교해 평균낸 값입니다. "
-                           "위 그래프(회귀식 기반)와 부호·크기가 비슷하면 결과가 믿을 만하고, 다르면 일수가 적거나 기온 분포가 달라서일 수 있습니다.")
+                with st.expander("검증용: 기온이 1℃ 이내로 같은 날끼리 직접 비교 (회귀식 없이)"):
+                    st.dataframe(pd.DataFrame([{
+                        "계절": r["season"], "비·눈 온 날(일)": r["n_wet"], "비교에 쓴 일수": r["n_used"],
+                        "같은 기온 '보통' 날 대비 공급량(%)": f"{r['est']:+.1f}",
+                        "90% 범위(%)": f"{r['lo']:+.1f} ∼ {r['hi']:+.1f}",
+                        "판정": "차이 확인" if (r["lo"] > 0 or r["hi"] < 0) else "확인 안 됨"} for r in match_rows]).set_index("계절"),
+                        use_container_width=True)
+                    st.caption("각 1℃ 기온 구간(예: 20.0~20.9℃) 안에서 비·눈 온 날과 '보통' 날의 공급량을 직접 비교해 평균낸 값입니다. "
+                               "위 그래프(회귀식 기반)와 부호·크기가 비슷하면 결과가 믿을 만하고, 다르면 일수가 적거나 기온 분포가 달라서일 수 있습니다.")
             with st.expander("상세 수치 보기 (일수·평균습도·신뢰구간)"):
                 t2 = []
                 for r in eff_rows:
