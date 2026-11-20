@@ -946,6 +946,13 @@ else:
                     customdata=[[r["n"]] for r in rr],
                     hovertemplate=sname + "<br>%{x}: %{y:+.2f}% (n=%{customdata[0]}일)<extra></extra>"))
             fig_h2.add_hline(y=0, line_dash="dash", line_color=C_ERR)
+            if "비·눈" in SHOW and any(r["season"].startswith("동절기") and r["grp"] == "비·눈" and np.isfinite(r["eff"]) for r in eff_rows):
+                _ix = SHOW.index("비·눈")
+                _bw = 1.0 / (1.0 + 0.3) / 3.0                      # 막대 1개 폭(bargap 0.3, 3개 그룹)
+                fig_h2.add_vrect(x0=_ix - 1.5 * _bw - 0.03, x1=_ix - 0.5 * _bw + 0.03, fillcolor="#FFE9A8", opacity=0.55,
+                                 layer="below", line_width=0)
+                fig_h2.add_annotation(x=_ix - _bw, xref="x", y=1.0, yref="paper", yanchor="bottom", showarrow=False,
+                                      text="<b>핵심: 동절기 비·눈</b>", font=dict(color="#8A6A00", size=12))
             fig_h2.update_layout(template="simple_white", barmode="group", bargap=0.3, font=dict(family=H_FONT, size=13, color=C_TXT),
                                  margin=dict(l=40, r=20, t=30, b=40), legend=dict(orientation="h", y=1.1),
                                  xaxis=dict(categoryorder="array", categoryarray=SHOW),
