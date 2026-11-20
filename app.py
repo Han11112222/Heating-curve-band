@@ -930,9 +930,9 @@ else:
             if use_pr:
                 st.info("계절별로 비교할 표본이 아직 부족합니다. 시트 입력이 더 진행된 뒤 새로고침해 주세요.")
         else:
-            st.caption("같은 기온에서 '보통' 날(비·눈이 없고 습도가 중간인 날)과 비교한 공급량 차이입니다. '보통' 날이 0%의 기준선이라 막대로는 그리지 않았습니다.")
+            st.caption("같은 기온에서 '보통' 날(비·눈이 없고 습도가 중간인 날)과 비교한 공급량 차이입니다. '보통' 날이 0%의 기준선입니다.")
 
-            SHOW = [g for g in GROUPS if g != "보통"]
+            SHOW = ["건조", "비·눈"]
             fig_h2 = go.Figure()
             for sname, _ in HUM_SEASONS:
                 rr = [r for r in eff_rows if r["season"] == sname and r["grp"] in SHOW and np.isfinite(r["eff"])]
@@ -951,8 +951,9 @@ else:
                                  xaxis=dict(categoryorder="array", categoryarray=SHOW),
                                  yaxis=dict(title="'보통' 날 대비 공급량 차이(%)", showgrid=True, gridcolor=C_GRID, zeroline=False))
             st.plotly_chart(fig_h2, use_container_width=True, config={"displaylogo": False})
-            st.caption("막대 위아래의 가는 세로선은 90% 신뢰구간(오차 범위)입니다. 선이 0을 포함하면 차이가 확인되지 않은 것입니다. "
-                       "'건조·습함'은 비·눈이 없던 날을 같은 달 안에서 습도 순위로 3등분한 것이고, 비·눈 온 날은 따로 구분했습니다.")
+            st.caption("막대 위아래의 가는 세로선은 90% 신뢰구간(오차 범위)입니다. 선이 0을 포함하면 차이가 확인되지 않은 것입니다.  \n"
+                       "'건조'는 비·눈이 없던 날을 같은 달 안에서 습도가 낮은 순으로 3등분했을 때 하위 1/3인 날입니다.  \n"
+                       "'비·눈'은 강수량 1mm 이상이거나 적설이 있던 날입니다.")
 
             # ── 일교차 보정: 비·눈 효과가 일교차 때문인지 확인 ─────────────
             adj = {}
