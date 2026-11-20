@@ -756,12 +756,16 @@ else:
         GROUPS = ["건조", "보통", "습함", "비·눈"]
         GROUP_DESC = {"건조": "건조 (비·눈 없음, 습도 하위 1/3)", "보통": "보통 (비·눈 없음, 습도 중간 1/3) ← 기준",
                       "습함": "습함 (비·눈 없음, 습도 상위 1/3)", "비·눈": f"비·눈 (강수 {RAIN_MM:g}mm 이상 또는 적설 있음)"}
-        SEASON_COLOR = {"동절기 (12~2월)": "#1E3F7A", "간절기·봄 (3~4월)": "#5B93D3", "간절기·가을 (10~11월)": "#A5CBF0"}
 
         def _sig(e, c):
             return np.isfinite(e) and ((e - c > 0) or (e + c < 0))
 
-        # ── ① 날씨 유형별: '보통' 날 대비 공급량 차이 (같은 기온 기준) ─────────
+        # ── 색상(차분한 블루 계열) ─────────────────────────────
+        C_NAVY, C_BLUE, C_SKY, C_PALE = "#16427A", "#2F74C0", "#8DBBE8", "#CFE3F7"
+        C_ERR, C_TXT, C_GRID = "#6C8FB8", "#35506F", "#E8F0FA"
+        SEASON_COLOR = {"동절기 (12~2월)": C_NAVY, "간절기·봄 (3~4월)": "#3E86D1", "간절기·가을 (10~11월)": C_SKY}
+
+        # ── 계산 ① 날씨 유형별: '보통' 날 대비 공급량 차이 (같은 기온 기준) ─────────
         eff_rows = []
         if use_pr:
             for sname, months in HUM_SEASONS:
@@ -788,66 +792,13 @@ else:
                                          temp=float(sg["temp"].mean()), eff=e, ci=c,
                                          mj=e / 100.0 * qmean if np.isfinite(e) else np.nan))
 
-        st.markdown("##### 1) 비·눈이 온 날은 공급량이 얼마나 다른가")
-        if not eff_rows:
-            if use_pr:
-                st.info("계절별로 비교할 표본이 아직 부족합니다. 시트 입력이 더 진행된 뒤 새로고침해 주세요.")
-        else:
-            for sname, _ in HUM_SEASONS:
-                rs = {r["grp"]: r for r in eff_rows if r["season"] == sname}
-                if not rs:
-                    continue
-                parts = []
-                for g, label in [("비·눈", "비·눈 온 날"), ("습함", "비·눈 없이 습한 날"), ("건조", "건조한 날")]:
-                    r = rs.get(g)
-                    if r is None or not np.isfinite(r["eff"]):
-                        continue
-                    parts.append(f"{label} {r['eff']:+.1f}%" + ("" if _sig(r["eff"], r["ci"]) else " (차이 확인 안 됨)"))
-                if parts:
-                    st.markdown(f"- **{sname}**: " + " / ".join(parts))
-            st.caption("같은 기온에서 '보통' 날(비·눈이 없고 습도가 중간인 날)과 비교한 공급량 차이입니다. '차이 확인 안 됨'은 우연일 가능성을 배제하지 못한다는 뜻입니다.")
-
-            fig_h2 = go.Figure()
-            for sname, _ in HUM_SEASONS:
-                rr = [r for r in eff_rows if r["season"] == sname and np.isfinite(r["eff"])]
-                if not rr:
-                    continue
-                fig_h2.add_trace(go.Bar(
-                    name=sname, x=[r["grp"] for r in rr], y=[r["eff"] for r in rr],
-                    error_y=dict(type="data", array=[r["ci"] for r in rr], visible=True, color="#7F9CC0"),
-                    marker_color=SEASON_COLOR[sname],
-                    text=[("기준" if r["grp"] == "보통" else f"{r['eff']:+.1f}%") for r in rr], textposition="outside",
-                    customdata=[[r["n"]] for r in rr],
-                    hovertemplate=sname + "<br>%{x}: %{y:+.2f}% (n=%{customdata[0]}일)<extra></extra>"))
-            fig_h2.add_hline(y=0, line_dash="dash", line_color="#7F9CC0")
-            fig_h2.update_layout(template="simple_white", barmode="group", bargap=0.25, font=dict(family=H_FONT, size=13),
-                                 margin=dict(l=40, r=20, t=30, b=40), legend=dict(orientation="h", y=1.1),
-                                 xaxis=dict(categoryorder="array", categoryarray=GROUPS),
-                                 yaxis=dict(title="'보통' 날 대비 공급량 차이(%)", showgrid=True, gridcolor="#E6EEF8", zeroline=False))
-            st.plotly_chart(fig_h2, use_container_width=True, config={"displaylogo": False})
-            st.caption("막대 위 선은 90% 신뢰구간이며 0을 포함하면 차이가 확인되지 않은 것입니다. "
-                       "'건조·보통·습함'은 비·눈이 없던 날을 같은 달 안에서 습도 순위로 3등분한 것이고, 비·눈 온 날은 따로 구분했습니다.")
-
-            with st.expander("상세 수치 보기 (일수·평균습도·신뢰구간)"):
-                t2 = []
-                for r in eff_rows:
-                    t2.append({
-                        "계절": r["season"], "구분": GROUP_DESC[r["grp"]], "일수": r["n"],
-                        "평균습도(%)": f"{r['hum']:.1f}", "평균기온(℃)": f"{r['temp']:.1f}",
-                        "보통 대비 공급량(%)": "기준" if r["grp"] == "보통" else _fmt(r["eff"], "+.2f"),
-                        "90% 신뢰구간(%)": "-" if (r["grp"] == "보통" or not np.isfinite(r["eff"])) else f"{r['eff'] - r['ci']:+.2f} ~ {r['eff'] + r['ci']:+.2f}",
-                        "일 환산(MJ/일)": "-" if (r["grp"] == "보통" or not np.isfinite(r["mj"])) else f"{r['mj']:+,.0f}",
-                        "판정": "기준" if r["grp"] == "보통" else ("유의미" if _sig(r["eff"], r["ci"]) else ("확인 안 됨" if np.isfinite(r["eff"]) else "표본 부족")),
-                    })
-                st.dataframe(pd.DataFrame(t2).set_index(["계절", "구분"]), use_container_width=True)
-                st.caption("'유의미'는 90% 신뢰구간이 0을 포함하지 않아 우연으로 보기 어려운 차이라는 뜻입니다(차이가 크다는 뜻은 아닙니다).")
-
-        # ── ② 계절별 요약: 습도가 높은 날은 어떤 날인가 + 습도 +10%p당 영향 ─────────
-        st.markdown("##### 2) 계절별 요약 — 습도가 10%p 높을 때 공급량 변화")
+        # ── 계산 ② 계절별 요약: 습도 +10%p당 영향 + 평균습도 ─────────
         sum_rows, sum_eff = [], []
         for sname, months in HUM_SEASONS:
             s_heat = heat_d[heat_d["month"].isin(months)]
-            row = {"계절": sname, "난방기 일수": len(s_heat)}
+            s_all = dd[dd["month"].isin(months)]
+            hum_all = float(s_all["hum"].mean()) if len(s_all) else np.nan
+            row = {"계절": sname, "난방기 일수": len(s_heat), "평균습도(%)": _fmt(hum_all, ".1f")}
             hum_dry = hum_wet = wet_share = np.nan
             if use_pr:
                 s_p = pr[pr["month"].isin(months)]
@@ -875,30 +826,117 @@ else:
             row["90% 신뢰구간(%)"] = "-" if not np.isfinite(eff) else f"{eff - ci:+.2f} ~ {eff + ci:+.2f}"
             row["판정"] = "유의미" if _sig(eff, ci) else ("확인 안 됨" if np.isfinite(eff) else "표본 부족")
             sum_rows.append(row)
-            sum_eff.append(dict(season=sname, eff=eff, ci=ci))
+            sum_eff.append(dict(season=sname, eff=eff, ci=ci, hum=hum_all))
+
+        # ============================================================
+        # 표시 1) 습도 +10%p당 공급량 변화 (평균습도 함께 표시) — 가장 먼저
+        # ============================================================
+        st.markdown("##### 1) 습도가 10%p 높을 때 공급량은 얼마나 달라지나")
+        ok_rows = [r for r in sum_eff if np.isfinite(r["eff"])]
+        if ok_rows:
+            fig_s = go.Figure(go.Bar(
+                x=[f"{r['season']}<br><span style='font-size:12px'>평균습도 {r['hum']:.0f}%</span>" for r in ok_rows],
+                y=[r["eff"] for r in ok_rows],
+                error_y=dict(type="data", array=[r["ci"] for r in ok_rows], visible=True, color=C_ERR, thickness=1.5, width=6),
+                marker_color=[C_BLUE if _sig(r["eff"], r["ci"]) else C_PALE for r in ok_rows],
+                marker_line_width=0,
+                text=[f"{r['eff']:+.2f}%" for r in ok_rows], textposition="outside", textfont=dict(color=C_TXT),
+                customdata=[[r["hum"]] for r in ok_rows],
+                hovertemplate="%{x}<br>습도 +10%p당 %{y:+.2f}%<extra></extra>"))
+            fig_s.add_hline(y=0, line_dash="dash", line_color=C_ERR)
+            fig_s.update_layout(template="simple_white", bargap=0.5, font=dict(family=H_FONT, size=13, color=C_TXT),
+                                margin=dict(l=40, r=20, t=30, b=40),
+                                yaxis=dict(title="습도 +10%p당 공급량 변화(%)", showgrid=True,
+                                           gridcolor=C_GRID, zeroline=False))
+            st.plotly_chart(fig_s, use_container_width=True, config={"displaylogo": False})
+            st.caption("진한 파랑 = 통계적으로 유의미, 연한 파랑 = 확인 안 됨(신뢰구간이 0을 포함). 막대 위아래의 가는 세로선은 90% 신뢰구간(오차 범위)입니다. "
+                       "x축 아래 '평균습도'는 그 계절 월~금의 평균습도입니다. "
+                       + ("비·눈이 전혀 없던 날끼리 비교한 값입니다." if use_pr else "강수 자료가 없어 전체 난방기 기준입니다."))
+        else:
+            st.info("계절별 습도 효과를 계산할 표본이 부족합니다.")
+
+        # 월별 평균 습도 (바로 아래)
+        hm = df[df["year"].isin(H_SEL_YEARS)].dropna(subset=["hum"]).groupby("month")["hum"].mean().reindex(range(1, 13))
+        ANALYZED = {12, 1, 2, 3, 4, 10, 11}
+        figM = go.Figure(go.Bar(
+            x=[f"{m}월" for m in hm.index], y=hm.values, marker_line_width=0,
+            marker_color=[C_BLUE if m in ANALYZED else C_PALE for m in hm.index],
+            text=[("" if not np.isfinite(v) else f"{v:.0f}") for v in hm.values], textposition="outside", textfont=dict(color=C_TXT),
+            hovertemplate="%{x}<br>평균 습도=%{y:.1f}%<extra></extra>"))
+        figM.update_layout(template="simple_white", bargap=0.3, font=dict(family=H_FONT, size=13, color=C_TXT),
+                           margin=dict(l=40, r=20, t=20, b=40),
+                           yaxis=dict(title="평균습도(%)", range=[0, 100], gridcolor=C_GRID))
+        st.markdown("**월별 평균 습도**")
+        st.plotly_chart(figM, use_container_width=True, config={"displaylogo": False})
+        st.caption("진한 파랑 = 위 분석에 쓰인 달(12~2월, 3~4월, 10~11월), 연한 파랑 = 분석에 쓰이지 않은 달입니다.")
+
+        # ============================================================
+        # 표시 2) 비·눈이 온 날은 공급량이 얼마나 다른가 ('보통' 기준 0%, 보통 막대는 그리지 않음)
+        # ============================================================
+        st.markdown("##### 2) 비·눈이 온 날은 공급량이 얼마나 다른가")
+        if not eff_rows:
+            if use_pr:
+                st.info("계절별로 비교할 표본이 아직 부족합니다. 시트 입력이 더 진행된 뒤 새로고침해 주세요.")
+        else:
+            for sname, _ in HUM_SEASONS:
+                rs = {r["grp"]: r for r in eff_rows if r["season"] == sname}
+                if not rs:
+                    continue
+                parts = []
+                for g, label in [("비·눈", "비·눈 온 날"), ("습함", "비·눈 없이 습한 날"), ("건조", "건조한 날")]:
+                    r = rs.get(g)
+                    if r is None or not np.isfinite(r["eff"]):
+                        continue
+                    parts.append(f"{label} {r['eff']:+.1f}%" + ("" if _sig(r["eff"], r["ci"]) else " (차이 확인 안 됨)"))
+                if parts:
+                    st.markdown(f"- **{sname}**: " + " / ".join(parts))
+            st.caption("같은 기온에서 '보통' 날(비·눈이 없고 습도가 중간인 날)과 비교한 공급량 차이입니다. '보통' 날이 0%의 기준선이라 막대로는 그리지 않았습니다.")
+
+            SHOW = [g for g in GROUPS if g != "보통"]
+            fig_h2 = go.Figure()
+            for sname, _ in HUM_SEASONS:
+                rr = [r for r in eff_rows if r["season"] == sname and r["grp"] in SHOW and np.isfinite(r["eff"])]
+                if not rr:
+                    continue
+                fig_h2.add_trace(go.Bar(
+                    name=sname, x=[r["grp"] for r in rr], y=[r["eff"] for r in rr],
+                    error_y=dict(type="data", array=[r["ci"] for r in rr], visible=True, color=C_ERR, thickness=1.5, width=5),
+                    marker_color=SEASON_COLOR[sname], marker_line_width=0,
+                    text=[f"{r['eff']:+.1f}%" for r in rr], textposition="outside", textfont=dict(color=C_TXT),
+                    customdata=[[r["n"]] for r in rr],
+                    hovertemplate=sname + "<br>%{x}: %{y:+.2f}% (n=%{customdata[0]}일)<extra></extra>"))
+            fig_h2.add_hline(y=0, line_dash="dash", line_color=C_ERR)
+            fig_h2.update_layout(template="simple_white", barmode="group", bargap=0.3, font=dict(family=H_FONT, size=13, color=C_TXT),
+                                 margin=dict(l=40, r=20, t=30, b=40), legend=dict(orientation="h", y=1.1),
+                                 xaxis=dict(categoryorder="array", categoryarray=SHOW),
+                                 yaxis=dict(title="'보통' 날 대비 공급량 차이(%)", showgrid=True, gridcolor=C_GRID, zeroline=False))
+            st.plotly_chart(fig_h2, use_container_width=True, config={"displaylogo": False})
+            st.caption("막대 위아래의 가는 세로선은 90% 신뢰구간(오차 범위)입니다. 선이 0을 포함하면 차이가 확인되지 않은 것입니다. "
+                       "'건조·습함'은 비·눈이 없던 날을 같은 달 안에서 습도 순위로 3등분한 것이고, 비·눈 온 날은 따로 구분했습니다.")
+
+            with st.expander("상세 수치 보기 (일수·평균습도·신뢰구간)"):
+                t2 = []
+                for r in eff_rows:
+                    t2.append({
+                        "계절": r["season"], "구분": GROUP_DESC[r["grp"]], "일수": r["n"],
+                        "평균습도(%)": f"{r['hum']:.1f}", "평균기온(℃)": f"{r['temp']:.1f}",
+                        "보통 대비 공급량(%)": "기준" if r["grp"] == "보통" else _fmt(r["eff"], "+.2f"),
+                        "90% 신뢰구간(%)": "-" if (r["grp"] == "보통" or not np.isfinite(r["eff"])) else f"{r['eff'] - r['ci']:+.2f} ~ {r['eff'] + r['ci']:+.2f}",
+                        "일 환산(MJ/일)": "-" if (r["grp"] == "보통" or not np.isfinite(r["mj"])) else f"{r['mj']:+,.0f}",
+                        "판정": "기준" if r["grp"] == "보통" else ("유의미" if _sig(r["eff"], r["ci"]) else ("확인 안 됨" if np.isfinite(r["eff"]) else "표본 부족")),
+                    })
+                st.dataframe(pd.DataFrame(t2).set_index(["계절", "구분"]), use_container_width=True)
+                st.caption("'유의미'는 90% 신뢰구간이 0을 포함하지 않아 우연으로 보기 어려운 차이라는 뜻입니다(차이가 크다는 뜻은 아닙니다).")
+
+        # ============================================================
+        # 표시 3) 계절별 요약표
+        # ============================================================
+        st.markdown("##### 3) 계절별 요약")
         st.dataframe(pd.DataFrame(sum_rows).set_index("계절"), use_container_width=True)
         st.caption("습도 +10%p는 '같은 달 평균보다 습도가 10%p 높은 날'을 뜻합니다. 비·눈이 있었던 날을 빼고(강수 자료가 있을 때) "
                    "기온이 같은 월~금끼리 비교했기 때문에, 비·눈 효과가 섞이지 않은 습도 차이만 남습니다. "
                    "'유의미'는 90% 신뢰구간이 0을 포함하지 않는다는 뜻이며 차이가 크다는 뜻은 아닙니다.")
 
-        ok_rows = [r for r in sum_eff if np.isfinite(r["eff"])]
-        if ok_rows:
-            fig_s = go.Figure(go.Bar(
-                x=[r["season"] for r in ok_rows], y=[r["eff"] for r in ok_rows],
-                error_y=dict(type="data", array=[r["ci"] for r in ok_rows], visible=True, color="#7F9CC0"),
-                marker_color=["#2B5FA8" if _sig(r["eff"], r["ci"]) else "#A5CBF0" for r in ok_rows],
-                text=[f"{r['eff']:+.2f}%" for r in ok_rows], textposition="outside",
-                hovertemplate="%{x}<br>습도 +10%p당 %{y:+.2f}%<extra></extra>"))
-            fig_s.add_hline(y=0, line_dash="dash", line_color="#7F9CC0")
-            fig_s.update_layout(template="simple_white", bargap=0.5, font=dict(family=H_FONT, size=13),
-                                margin=dict(l=40, r=20, t=30, b=40),
-                                yaxis=dict(title="습도 +10%p당 공급량 변화(%)", showgrid=True,
-                                           gridcolor="#E6EEF8", zeroline=False))
-            st.plotly_chart(fig_s, use_container_width=True, config={"displaylogo": False})
-            st.caption("진한 파랑 = 통계적으로 유의미, 연한 파랑 = 확인 안 됨(신뢰구간이 0을 포함). 막대 위 선은 90% 신뢰구간입니다. "
-                       + ("비·눈이 전혀 없던 날끼리 비교한 값입니다." if use_pr else "강수 자료가 없어 전체 난방기 기준입니다."))
-
-        # ── ③ 참고 자료 ───────────────────────────────────────
         with st.expander("연도별 사용 일수 확인 (습도·강수 데이터가 어느 해부터 쓰였는지)"):
             base_yr = df[df["year"].isin(H_SEL_YEARS)].groupby("year").size()
             hum_yr = df[df["year"].isin(H_SEL_YEARS)].dropna(subset=["hum"]).groupby("year").size()
@@ -912,15 +950,6 @@ else:
             st.dataframe(yt, use_container_width=True)
             st.caption("'습도도 있는 날'이 0이면 그 해는 습도 분석에 쓰이지 않습니다. '연도별 공급 수준'은 같은 기온 기준으로 "
                        "전체 평균보다 그 해 공급량이 몇 % 높았는지를 나타내며, 분석에서는 이 차이를 제거했습니다.")
-
-        with st.expander("월별 평균 습도 (참고)"):
-            hm = df[df["year"].isin(H_SEL_YEARS)].dropna(subset=["hum"]).groupby("month")["hum"].mean().reindex(range(1, 13))
-            figM = go.Figure(go.Bar(x=[f"{m}월" for m in hm.index], y=hm.values, marker_color="#5B93D3",
-                                    hovertemplate="%{x}<br>평균 습도=%{y:.1f}%<extra></extra>"))
-            figM.update_layout(template="simple_white", bargap=0.3, font=dict(family=H_FONT, size=13),
-                               margin=dict(l=40, r=20, t=20, b=40),
-                               yaxis=dict(title="평균습도(%)", range=[0, 100], gridcolor="#E6EEF8"))
-            st.plotly_chart(figM, use_container_width=True, config={"displaylogo": False})
 
         st.caption(f"방법: 난방기(평균기온 {theta_h:.1f}℃ 미만)만 사용 · 기온 효과는 Poly-3로 제거하고 연도별 공급 수준 차이도 보정한 뒤 남은 차이(%)를 비교했습니다. "
                    "비·눈 온 날은 강수량 1mm 이상이거나 적설이 있는 날이고, 그보다 적게 온 날(미량)은 제외했습니다. "
